@@ -6,16 +6,28 @@
 
 from __future__ import annotations
 
+import base64
 import os
+import re
 import secrets
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+from claude_register.config import (
+    FALLBACK_CODE_REGEX,
+    MAGIC_LINK_REGEX,
+    resolve_code_regex,
+)
+from claude_register.console import log
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -52,6 +64,56 @@ class Mailbox:
     email: str
     expires_at: str | None = None
     tag: str | None = None
+
+
+# 致命错误：不会因为重试而变好（正则语法错 / key 失效 / scope 不足）
+FATAL_STATUSES = frozenset({400, 401, 403})
+
+
+def extract_code(email: dict[str, Any], regex: str) -> str | None:
+    """在 subject / text_body / html_body 里找验证码。
+
+    有捕获组返回第 1 组，否则返回整段匹配（与 AnyMail 服务端行为一致）。
+    """
+    try:
+        pattern = re.compile(regex, re.IGNORECASE)
+    except re.error:
+        return None
+    for field in ("subject", "text_body", "html_body"):
+        value = email.get(field) or ""
+        match = pattern.search(str(value))
+        if match:
+            return match.group(1) if match.groups() else match.group(0)
+    return None
+
+
+def magic_link_recipient(link: str) -> str | None:
+    """从魔术链接尾部的 base64 解出收件邮箱；解不出返回 None。"""
+    frag = link.partition("#")[2]
+    b64 = frag.partition(":")[2]
+    if not b64:
+        return None
+    try:
+        pad = "=" * (-len(b64) % 4)
+        email = base64.b64decode(b64 + pad).decode("utf-8", "replace")
+    except Exception:
+        return None
+    return email.strip().lower() if "@" in email else None
+
+
+def extract_magic_link(email: dict[str, Any]) -> str | None:
+    """从邮件里提取 Claude 魔术登录链接。
+
+    实测：链接只在 html_body 里（text_body 为空），且是 HTML 转义过的，
+    所以必须先 unescape 再匹配。
+    """
+    pattern = re.compile(MAGIC_LINK_REGEX)
+    for field in ("text_body", "html_body", "subject"):
+        raw = email.get(field) or ""
+        match = pattern.search(unescape(str(raw)))
+        if match:
+            return match.group(0).rstrip("&")
+    return None
 
 
 class AnyMailClient:
@@ -267,6 +329,150 @@ class AnyMailClient:
                     tag=account.get("tag"),
                 )
             raise RuntimeError(f"AnyMail 邮箱地址冲突，多次重试仍失败：{last_error}")
+
+    def _fetch_latest(
+        self,
+        *,
+        to: str,
+        since: str,
+        code_regex: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """单次 GET /api/emails/latest。致命状态码直接抛，其余交调用方退避。"""
+        params = {
+            "to": to,
+            "since": since,
+            "code_regex": code_regex,
+            "limit": max(1, min(int(limit), 50)),
+        }
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.get(
+                f"{self.base_url}/api/emails/latest",
+                headers=self._headers(),
+                params=params,
+            )
+            if resp.status_code in FATAL_STATUSES:
+                raise RuntimeError(
+                    f"AnyMail 接码失败 {resp.status_code}: {resp.text[:300]}\n"
+                    "请确认 API Key 含 emails:read scope，且 code_regex 语法正确。"
+                )
+            if resp.status_code >= 400:
+                # 5xx：交给调用方指数退避
+                raise httpx.HTTPStatusError(
+                    f"{resp.status_code}: {resp.text[:200]}",
+                    request=resp.request,
+                    response=resp,
+                )
+            try:
+                data = resp.json() if resp.content else {}
+            except ValueError as exc:
+                # 200 但响应体不是合法 JSON（比如网关返回的 HTML 错误页）：
+                # 交给调用方按退避重试，不当作致命错误、更不能让异常逃出轮询循环。
+                raise httpx.HTTPStatusError(
+                    f"响应体不是合法 JSON: {exc}",
+                    request=resp.request,
+                    response=resp,
+                ) from exc
+
+        emails = data.get("emails") if isinstance(data, dict) else None
+        return [e for e in emails if isinstance(e, dict)] if isinstance(emails, list) else []
+
+    def poll_code(
+        self,
+        *,
+        to: str,
+        since: str,
+        code_regex: str | None = None,
+        fallback_regex: str | None = None,
+        timeout: float = 120.0,
+        interval: float = 3.0,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> str | None:
+        """轮询直到取到验证码；超时返回 None（调用方走降级路径）。
+
+        两级匹配在单次响应内完成：先用服务端提取的 code，没有再用兜底正则
+        匹配同一批邮件的正文——避免每轮翻倍请求。
+        """
+        primary = code_regex or resolve_code_regex(os.getenv("ANYMAIL_CODE_REGEX"))
+        fallback = fallback_regex or FALLBACK_CODE_REGEX
+        deadline = monotonic() + timeout
+        backoff = 1.0
+
+        log(f"开始接码：{to}（超时 {timeout:.0f}s，每 {interval:.0f}s 一次）")
+        while monotonic() < deadline:
+            try:
+                emails = self._fetch_latest(
+                    to=to, since=since, code_regex=primary
+                )
+            except httpx.HTTPError as exc:
+                log(f"接码请求失败（{exc}），{backoff:.0f}s 后重试。")
+                sleep(backoff)
+                backoff = min(backoff * 2, 4.0)
+                continue
+            backoff = 1.0
+
+            for email in emails:
+                code = email.get("code")
+                if code:
+                    return str(code)
+            for email in emails:
+                code = extract_code(email, fallback)
+                if code:
+                    log("服务端未提取到码，已用兜底正则命中。")
+                    return code
+
+            sleep(interval)
+
+        return None
+
+    def poll_magic_link(
+        self,
+        *,
+        to: str,
+        since: str,
+        timeout: float = 120.0,
+        interval: float = 3.0,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> str | None:
+        """轮询直到拿到魔术登录链接；超时返回 None。
+
+        只接受 base64 尾巴解出来等于 to 的链接——避免抓错别的邮箱的邮件。
+        """
+        target = to.strip().lower()
+        deadline = monotonic() + timeout
+        backoff = 1.0
+
+        log(f"开始等待登录链接：{to}（超时 {timeout:.0f}s，每 {interval:.0f}s 一次）")
+        while monotonic() < deadline:
+            try:
+                emails = self._fetch_latest(to=to, since=since, code_regex="")
+            except httpx.HTTPError as exc:
+                log(f"查询邮件失败（{exc}），{backoff:.0f}s 后重试。")
+                sleep(backoff)
+                backoff = min(backoff * 2, 4.0)
+                continue
+            backoff = 1.0
+
+            for email in emails:
+                link = extract_magic_link(email)
+                if not link:
+                    continue
+                who = magic_link_recipient(link)
+                if who is None:
+                    # AnyMail 的 to 是 LIKE 匹配，不是精确匹配，收件人校验解不出来时
+                    # 不能当成"没问题"放行——宁可继续等，也不能拿错邮箱的链接去登录。
+                    log("跳过收件人无法解析的链接（base64 尾巴解不出邮箱）。")
+                    continue
+                if who != target:
+                    log(f"跳过收件人不匹配的链接（{who}）。")
+                    continue
+                return link
+
+            sleep(interval)
+
+        return None
 
     def delete_mailbox(self, account_id: str) -> None:
         if not account_id:

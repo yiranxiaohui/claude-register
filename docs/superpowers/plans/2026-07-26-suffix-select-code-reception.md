@@ -891,26 +891,40 @@ def test_create_for_suffix_permanent_when_expires_zero(client, monkeypatch):
 
 
 @respx.mock
-def test_prepare_mailbox_records_since_before_create(client):
+def test_prepare_mailbox_records_since_before_create(client, monkeypatch):
     """接码文档 §8.2：since 必须早于 POST /api/accounts，
-    否则会漏掉「建邮箱完成 → 首次轮询」窗口里到达的邮件。"""
-    observed: list[str] = []
+    否则会漏掉「建邮箱完成 → 首次轮询」窗口里到达的邮件。
+
+    注意：不要用 `assert since <= utc_now_iso()` —— 那个断言恒真，
+    无论 since 在建邮箱前还是后记录都会通过，测不出这个回归。
+    必须用严格递增的假时钟，在请求发生的那一刻读一次，证明因果顺序。
+    """
+    from claude_register import mailbox as mailbox_mod
+
+    ticks: list[str] = []
+
+    def fake_clock() -> str:
+        ticks.append(f"2026-07-26T00:00:{len(ticks):02d}Z")
+        return ticks[-1]
+
+    monkeypatch.setattr(mailbox_mod, "utc_now_iso", fake_clock)
+
+    request_ticks: list[str] = []
 
     def _capture(request):
-        observed.append("post")
+        # 在请求真正发出的这一刻读时钟
+        request_ticks.append(fake_clock())
         return httpx.Response(200, json=_account("claude_x@mail.test"))
 
     respx.post(ACCOUNTS).mock(side_effect=_capture)
 
     box, since = prepare_mailbox(client, domain="mail.test")
 
-    assert observed == ["post"]
     assert box.email == "claude_x@mail.test"
     assert since.endswith("Z")
-    # since 必须是建邮箱之前的时刻：重新取 now 一定不早于它
-    from claude_register.mailbox import utc_now_iso
-
-    assert since <= utc_now_iso()
+    # since 必须是整个用例里最先被读到的刻度，且严格早于建邮箱请求
+    assert since == ticks[0]
+    assert request_ticks and since < request_ticks[0]
 
 
 @respx.mock
@@ -1232,7 +1246,7 @@ def run_browser(email: str) -> None:
         browser.close()
 ```
 
-`flow.py` 里 `choose_domain` / `create_custom_mailbox` / `choose_mailbox` 暂时保留（Task 7 删）。把它们里的 `_prompt` 调用改成 `prompt`。
+`flow.py` 里 `choose_domain` / `create_custom_mailbox` / `choose_mailbox` 暂时保留（**Task 8 重写 flow.py 时删除**）。把它们里的 `_prompt` 调用改成 `prompt`。
 
 - [ ] **Step 3: 验证 import 无环、无语法错**
 
@@ -1405,27 +1419,37 @@ git commit -m "docs: 记录 claude.ai 验证码界面 DOM 结构"
 
 - [ ] **Step 1: 读 Task 6 的笔记**
 
-打开 `docs/superpowers/notes/2026-07-26-code-screen-dom.md`，确认第 1、2、3、4 问的答案。**下面的实现是骨架，选择器必须按笔记里实测的结果填。**
+打开 `docs/superpowers/notes/2026-07-26-code-screen-dom.md`。下面的实现已按笔记的实测结论重写，**选择器都是实测确认过的，不要再改回猜测的定位链**。
 
-- [ ] **Step 2: 实现两个函数**
+Task 6 推翻了本计划原先的三个假设：
 
-加到 `browser.py` 末尾。按笔记调整 `_code_input` 里的定位链：
+1. **`fill_email` 之后不是验证码界面，而是一个 0 个 input 的中间态**（"To continue, click the link sent to…"，只有三个按钮）。必须先点 `data-testid="enter-code"`，验证码输入框才会出现。原先的 `_code_input` 定位链会在这个 0-input 页面上一直超时。
+2. **是单个输入框，不是 6 个 OTP 格子。** 所以原计划的 `_fill_otp_boxes` 是死代码，删掉。
+3. **不会满位自动提交**（用请求监听实测过），必须显式点 `data-testid="continue"`。而且提交按钮的 `disabled` 恒为 `False`，不能用它判断输入是否填满。
+
+还有一个 Task 6 发现的、原计划完全没预料到的环节：**点提交后可能弹 hCaptcha 拖拽验证**。用假码实测会弹，真码是否必然弹未知。**已决定的处理方式：填码和提交照做，检测到 hCaptcha 就打印提示、截图、保留浏览器让人工拖拽，不尝试自动绕过。**
+
+- [ ] **Step 2: 实现四个函数**
+
+加到 `browser.py` 末尾。所有选择器都来自 Task 6 实测：
 
 ```python
 def _code_input(page: Page):
-    """按 Task 6 笔记的优先级定位验证码输入。
+    """定位验证码输入框。Task 6 实测：单个 input，data-testid="code" 最稳。
 
-    定位链按稳定性排序，逐个试；全都不中返回 None。
-    注意：若笔记结论是「6 个分开的 OTP 格子」，改用下面 _fill_otp_boxes 分支。
+    找不到返回 None（调用方降级，不抛异常）。
     """
-    candidates = [
+    try:
+        box = page.get_by_test_id("code")
+        if box.count() >= 1 and box.first.is_visible():
+            return box.first
+    except Exception:
+        pass
+    # 兜底：data-testid 若改版，用同一元素的另外两个稳定属性
+    for build in (
         lambda: page.locator("input[autocomplete='one-time-code']"),
-        lambda: page.get_by_label("Verification code"),
-        lambda: page.get_by_placeholder("Enter code"),
-        lambda: page.locator("input[name='code']"),
-        lambda: page.locator("input[inputmode='numeric']"),
-    ]
-    for build in candidates:
+        lambda: page.get_by_label("Login code"),
+    ):
         try:
             loc = build()
             if loc.count() >= 1 and loc.first.is_visible():
@@ -1435,26 +1459,37 @@ def _code_input(page: Page):
     return None
 
 
-def _fill_otp_boxes(page: Page, code: str) -> bool:
-    """多格 OTP：逐格填。仅当 Task 6 笔记确认是这种结构时才走这里。"""
-    boxes = page.locator("input[inputmode='numeric'], input[maxlength='1']")
+def _reveal_code_input(page: Page) -> bool:
+    """点掉中间态的「Enter verification code」按钮，把验证码输入框展开出来。
+
+    Task 6 实测：fill_email 之后先落在一个 0 个 input 的提示界面，
+    必须点这个按钮才会出现输入框。已经在验证码界面时直接返回 True。
+    """
+    if _code_input(page) is not None:
+        return True
     try:
-        count = boxes.count()
-    except Exception:
-        return False
-    if count < len(code):
-        return False
-    for i, ch in enumerate(code):
-        boxes.nth(i).fill(ch)
-    log(f"已逐格填入验证码（{count} 格）。")
-    return True
+        btn = page.get_by_test_id("enter-code")
+        if btn.count() >= 1 and btn.first.is_visible():
+            btn.first.click()
+            log("已点击 Enter verification code")
+            return True
+    except Exception as exc:
+        log(f"点击 Enter verification code 失败（{exc}）。")
+    return False
 
 
 def wait_code_screen(page: Page, timeout_ms: int = 60_000) -> bool:
-    """等验证码界面出现。返回 False 表示没等到（调用方降级，不抛异常）。"""
+    """等验证码输入框出现，中途自动点掉中间态按钮。
+
+    返回 False 表示没等到（调用方降级，不抛异常）。
+    """
     step = 2_000
     waited = 0
     while waited < timeout_ms:
+        if _code_input(page) is not None:
+            log("验证码界面已出现。")
+            return True
+        _reveal_code_input(page)
         if _code_input(page) is not None:
             log("验证码界面已出现。")
             return True
@@ -1465,12 +1500,30 @@ def wait_code_screen(page: Page, timeout_ms: int = 60_000) -> bool:
     return False
 
 
+def hcaptcha_visible(page: Page) -> bool:
+    """检测提交后是否弹了 hCaptcha 拖拽验证。
+
+    Task 6 实测：点提交会触发 api.hcaptcha.com/getcaptcha，并弹出拖拽题。
+    这里只负责如实告知调用方，不尝试自动绕过。
+    """
+    for sel in (
+        "iframe[src*='hcaptcha.com']",
+        "iframe[title*='hCaptcha']",
+        "iframe[src*='/fc/gt2/']",
+    ):
+        try:
+            loc = page.locator(sel)
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def fill_code(page: Page, code: str) -> bool:
-    """填验证码并提交。返回 False 表示定位不到（调用方打印验证码让人手填）。"""
+    """填验证码并提交。返回 False 表示填不进去（调用方打印验证码让人手填）。"""
     box = _code_input(page)
     if box is None:
-        if _fill_otp_boxes(page, code):
-            return _submit_code(page)
         log("找不到验证码输入框。")
         return False
 
@@ -1487,31 +1540,33 @@ def fill_code(page: Page, code: str) -> bool:
 
 
 def _submit_code(page: Page) -> bool:
-    """点提交按钮。有些 OTP 满位自动提交，找不到按钮不算失败。"""
-    for name in ("Continue", "Verify", "Submit", "Log in"):
-        try:
-            btn = page.get_by_role("button", name=name)
-            if btn.count() >= 1 and btn.first.is_enabled():
-                btn.first.click()
-                log(f"已点击 {name}")
-                return True
-        except Exception:
-            continue
-    log("未找到提交按钮（可能满位自动提交）。")
-    return True
+    """点提交按钮。Task 6 实测：data-testid="continue"，不会自动提交。
+
+    注意：提交按钮的 disabled 恒为 False，不能用它判断输入是否填满。
+    """
+    try:
+        btn = page.get_by_test_id("continue")
+        if btn.count() >= 1 and btn.first.is_visible():
+            btn.first.click()
+            log("已点击提交（Verify Email Address）")
+            return True
+    except Exception as exc:
+        log(f"点击提交按钮失败（{exc}）。")
+        return False
+    log("未找到提交按钮。")
+    return False
 ```
 
 - [ ] **Step 3: 实跑验证**
 
-先手动跑到验证码界面，确认 `wait_code_screen` 返回 `True`：
+Task 6 的探针已经确认过这些选择器能定位到元素（`output/code_screen_real.html` 里 `data-testid="code"` / `"continue"` 各出现 1 次，中间态里 `"enter-code"` 出现 1 次）。这一步只需确认新函数导入无误、语法正确：
 
 ```bash
-uv run scripts/probe_code_screen.py
+uv run python -c "from claude_register.browser import wait_code_screen, fill_code, hcaptcha_visible; print('ok')"
+uv run pytest tests/ -q
 ```
 
-在探针停住时，另开终端确认能从 AnyMail 后台看到验证码邮件。
-
-**Task 8 会做完整端到端验证。** 这一步只需确认选择器能定位到元素，不报异常。
+**完整端到端验证在 Task 8 做**——那里才有真实验证码可填。
 
 - [ ] **Step 4: 提交**
 
@@ -1550,6 +1605,7 @@ from claude_register.anymail import AnyMailClient, Mailbox, load_dotenv
 from claude_register.browser import (
     fill_code,
     fill_email,
+    hcaptcha_visible,
     launch_browser,
     new_page,
     open_login,
@@ -1617,6 +1673,11 @@ def run_browser(
                 else:
                     page.wait_for_timeout(3_000)
                     screenshot(page, "after_code.png")
+                    if hcaptcha_visible(page):
+                        screenshot(page, "hcaptcha.png")
+                        banner("需要人工拖拽 hCaptcha 验证")
+                        log("提交验证码后弹出了 hCaptcha 拖拽题（Task 6 已知现象）。")
+                        log("请在浏览器里手动完成拖拽，脚本不会自动绕过。")
                     log(f"当前地址：{page.url}")
 
             pause_for_user()
@@ -1744,11 +1805,16 @@ uv run main.py
 
 1. 提示选后缀（或直接用 `ANYMAIL_DOMAIN`）
 2. 打印「已创建邮箱：claude_xxxxxxxx@<后缀>」
-3. 打开 claude.ai，填入邮箱，点 Continue
-4. 打印「验证码界面已出现」
+3. 打开 claude.ai，填入邮箱，点 Continue（Cloudflare 可能等 30-120 秒）
+4. 打印「已点击 Enter verification code」→「验证码界面已出现」
 5. 打印「开始接码：…」并轮询
 6. 横幅打印「验证码：xxxxxx」
-7. 自动填入并提交，登录成功
+7. 自动填入并点击提交（Verify Email Address）
+8. 若弹 hCaptcha 拖拽题：横幅提示需人工拖拽，浏览器保持打开
+
+**验收标准：第 6 步必须拿到真实验证码，第 7 步必须成功填入并提交。**
+
+第 8 步的 hCaptcha 是 Task 6 发现的已知现象，用假码实测会弹、真码是否必然弹未知——**这一步需要人工完成属于预期行为，不算失败**。跑完请如实记录：真码提交后到底弹没弹 hCaptcha，这是本计划唯一还没答案的问题。
 
 **若第 7 步失败但第 6 步拿到了码 —— 降级路径生效，属于可接受结果**，把实际情况记下来。
 
@@ -1876,6 +1942,396 @@ uv run pytest tests/ -v
 ```bash
 git add README.md .env.example
 git commit -m "docs: 更新 README 与 .env.example 说明新流程"
+```
+
+---
+
+### Task 10: 改为提取并打开魔术链接（推翻接码前提）
+
+**Files:**
+- Modify: `claude_register/config.py`（正则）
+- Modify: `claude_register/anymail.py`（新增 `extract_magic_link` + `poll_magic_link`）
+- Modify: `claude_register/browser.py`（新增 `open_magic_link`）
+- Modify: `claude_register/flow.py`（改编排：优先魔术链接）
+- Modify: `main.py`（flag 更名）
+- Test: `tests/test_magic_link.py`
+
+**Interfaces:**
+- Consumes: `AnyMailClient._fetch_latest`、`console.log`
+- Produces:
+  - `MAGIC_LINK_REGEX: str`
+  - `extract_magic_link(email: dict) -> str | None`
+  - `AnyMailClient.poll_magic_link(*, to, since, timeout=120.0, interval=3.0, sleep=..., monotonic=...) -> str | None`
+  - `open_magic_link(page, link: str) -> bool`
+
+> **为什么有这个 task：** Task 8 实跑受阻后，控制端绕过浏览器直接查了 AnyMail 上约 40 封真实 Claude 登录邮件，发现**本计划的核心前提是错的**。
+
+**实测证据（控制端在 100 个邮箱上扫描）：**
+
+1. **Claude 不发 6 位验证码，发的是魔术链接。** 所有登录邮件标题都是 `Secure link to log in to Claude.ai | <时间>` 或 `Your secure link to Claude.ai is here | <时间>`，正文里是：
+   ```
+   https://claude.ai/magic-link#<32位hex token>:<base64(收件邮箱)>
+   ```
+   **没有任何一封里有 6 位验证码。** 所以 `poll_code` 再怎么写也不可能命中。
+
+2. **`text_body` 是空的**（`len=0`），链接只存在于 `html_body`（约 9KB）。提取必须搜 `html_body`，且**必须先 `html.unescape`**——链接在正文里是 HTML 转义过的。
+
+3. **兜底正则 `\b(\d{6})\b` 会产生假阳性，而且是危险的那种。** 实测命中 `000000`、`737163`、`262624`——上下文证明它们是 CSS 十六进制颜色（`bgcolor="#000000"`、`color: #737163`，`#262624` 是 Claude 品牌色）。`fill_code` 会把颜色值填进验证码框并报告"成功"。**静默填错比直接失败更糟**，必须修掉。
+
+4. **链接结构自带校验：** base64 尾巴解出来就是收件邮箱，与目标邮箱比对即可确认没抓错邮件。
+
+**保留 `poll_code` 不删** —— Task 6 确实在 UI 上看到过验证码输入框（`data-testid="code"`），说明 Claude 存在验证码流程，只是这些邮箱收到的是链接邮件。什么条件触发码邮件尚未查明，留着以备后用，但默认路径改走魔术链接。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/test_magic_link.py`：
+
+```python
+"""魔术链接提取与轮询。"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+import respx
+
+from claude_register.anymail import extract_magic_link
+
+LATEST = "https://mail.test/api/emails/latest"
+
+# 真实邮件片段（控制端从 AnyMail 实测抓取，链接在 html_body 里且被 HTML 转义）
+REAL_HTML = (
+    '<td align="center" bgcolor="#000000" role="presentation">'
+    '<a href="https://claude.ai/magic-link#db3b0fc94f6475dbeae9b4d6ee1fea14:'
+    'Y2xhdWRlX2FhZmRiZTI1QGNrdmxoai54eXo=" '
+    'style="color: #737163;">Log in to Claude.ai</a></td>'
+)
+REAL_LINK = (
+    "https://claude.ai/magic-link#db3b0fc94f6475dbeae9b4d6ee1fea14:"
+    "Y2xhdWRlX2FhZmRiZTI1QGNrdmxoai54eXo="
+)
+
+
+def _email(**kw) -> dict:
+    base = {"subject": "", "text_body": "", "html_body": "", "code": None}
+    base.update(kw)
+    return base
+
+
+def test_extract_from_real_html_body():
+    assert extract_magic_link(_email(html_body=REAL_HTML)) == REAL_LINK
+
+
+def test_extract_handles_html_escaped_amp():
+    """真实邮件里 & 会被转义成 &amp;，提取前必须 unescape。"""
+    escaped = REAL_HTML.replace("magic-link#", "magic-link#") + "&amp;utm=1"
+    assert extract_magic_link(_email(html_body=escaped)) == REAL_LINK
+
+
+def test_extract_searches_text_body_too():
+    assert extract_magic_link(_email(text_body=f"Click {REAL_LINK} to log in")) == REAL_LINK
+
+
+def test_extract_returns_none_without_link():
+    assert extract_magic_link(_email(html_body="<p>no link here</p>")) is None
+
+
+def test_extract_ignores_other_claude_urls():
+    """普通 claude.ai 链接不能误当成魔术链接。"""
+    html = '<a href="https://claude.ai/login">Log in</a><a href="https://claude.ai/pricing">Pricing</a>'
+    assert extract_magic_link(_email(html_body=html)) is None
+
+
+def test_extract_recipient_from_link():
+    """base64 尾巴解出收件邮箱——用来确认没抓错邮件。"""
+    from claude_register.anymail import magic_link_recipient
+
+    assert magic_link_recipient(REAL_LINK) == "claude_aafdbe25@ckvlhj.xyz"
+
+
+def test_extract_recipient_handles_garbage():
+    from claude_register.anymail import magic_link_recipient
+
+    assert magic_link_recipient("https://claude.ai/magic-link#abc") is None
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@respx.mock
+def test_poll_magic_link_hit_first_round(client):
+    respx.get(LATEST).mock(
+        return_value=httpx.Response(200, json={"emails": [_email(html_body=REAL_HTML)]})
+    )
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="claude_aafdbe25@ckvlhj.xyz",
+        since="2026-07-26T00:00:00Z",
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link == REAL_LINK
+    assert clock.slept == []
+
+
+@respx.mock
+def test_poll_magic_link_timeout_returns_none(client):
+    respx.get(LATEST).mock(return_value=httpx.Response(200, json={"emails": []}))
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="a@mail.test",
+        since="2026-07-26T00:00:00Z",
+        timeout=10.0,
+        interval=3.0,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link is None
+    assert clock.now >= 10.0
+
+
+@respx.mock
+def test_poll_magic_link_skips_wrong_recipient(client):
+    """抓到别人的链接必须跳过，不能拿去登录错的账号。"""
+    other = _email(
+        html_body='<a href="https://claude.ai/magic-link#deadbeef:b3RoZXJAbWFpbC50ZXN0">x</a>'
+    )
+    respx.get(LATEST).mock(
+        side_effect=[
+            httpx.Response(200, json={"emails": [other]}),
+            httpx.Response(200, json={"emails": [_email(html_body=REAL_HTML)]}),
+        ]
+    )
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="claude_aafdbe25@ckvlhj.xyz",
+        since="2026-07-26T00:00:00Z",
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link == REAL_LINK
+
+
+@respx.mock
+def test_poll_magic_link_backoff_on_5xx(client):
+    respx.get(LATEST).mock(
+        side_effect=[
+            httpx.Response(503, text="down"),
+            httpx.Response(200, json={"emails": [_email(html_body=REAL_HTML)]}),
+        ]
+    )
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="claude_aafdbe25@ckvlhj.xyz",
+        since="2026-07-26T00:00:00Z",
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link == REAL_LINK
+    assert clock.slept == [1.0]
+```
+
+`tests/test_config.py` 追加一条——钉住那个假阳性：
+
+```python
+def test_fallback_regex_ignores_css_hex_colors():
+    """实测过的坑：邮件 HTML 里的 #000000 / #737163 会被裸 \\d{6} 当成验证码。"""
+    from claude_register.anymail import extract_code
+    from claude_register.config import FALLBACK_CODE_REGEX
+
+    html = '<td bgcolor="#000000" style="color: #737163;">Log in</td>'
+    assert extract_code({"html_body": html}, FALLBACK_CODE_REGEX) is None
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+```bash
+uv run pytest tests/test_magic_link.py -v
+```
+
+预期：FAIL — `ImportError: cannot import name 'extract_magic_link'`
+
+- [ ] **Step 3: 实现**
+
+`config.py` 加正则，并修掉兜底正则的假阳性：
+
+```python
+# 魔术链接：https://claude.ai/magic-link#<32位hex>:<base64(邮箱)>
+MAGIC_LINK_REGEX = r"https://claude\.ai/magic-link#[A-Za-z0-9+/=:._-]+"
+
+# 兜底正则：要求 6 位数字前面不是 #，避开邮件 HTML 里的 CSS 颜色值
+# （实测坑：#000000 / #737163 / #262624 都会被裸 \b\d{6}\b 命中）
+FALLBACK_CODE_REGEX = r"(?<![#0-9A-Fa-f])\b(\d{6})\b"
+```
+
+`anymail.py` 加两个模块级函数：
+
+```python
+def magic_link_recipient(link: str) -> str | None:
+    """从魔术链接尾部的 base64 解出收件邮箱；解不出返回 None。"""
+    frag = link.partition("#")[2]
+    b64 = frag.partition(":")[2]
+    if not b64:
+        return None
+    try:
+        pad = "=" * (-len(b64) % 4)
+        email = base64.b64decode(b64 + pad).decode("utf-8", "replace")
+    except Exception:
+        return None
+    return email.strip().lower() if "@" in email else None
+
+
+def extract_magic_link(email: dict[str, Any]) -> str | None:
+    """从邮件里提取 Claude 魔术登录链接。
+
+    实测：链接只在 html_body 里（text_body 为空），且是 HTML 转义过的，
+    所以必须先 unescape 再匹配。
+    """
+    pattern = re.compile(MAGIC_LINK_REGEX)
+    for field in ("text_body", "html_body", "subject"):
+        raw = email.get(field) or ""
+        match = pattern.search(unescape(str(raw)))
+        if match:
+            return match.group(0).rstrip("&")
+    return None
+```
+
+顶部补 `import base64` 和 `from html import unescape`，以及 `from claude_register.config import MAGIC_LINK_REGEX`。
+
+`AnyMailClient` 加方法（与 `poll_code` 同构，复用 `_fetch_latest`）：
+
+```python
+    def poll_magic_link(
+        self,
+        *,
+        to: str,
+        since: str,
+        timeout: float = 120.0,
+        interval: float = 3.0,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> str | None:
+        """轮询直到拿到魔术登录链接；超时返回 None。
+
+        只接受 base64 尾巴解出来等于 to 的链接——避免抓错别的邮箱的邮件。
+        """
+        target = to.strip().lower()
+        deadline = monotonic() + timeout
+        backoff = 1.0
+
+        log(f"开始等待登录链接：{to}（超时 {timeout:.0f}s，每 {interval:.0f}s 一次）")
+        while monotonic() < deadline:
+            try:
+                emails = self._fetch_latest(to=to, since=since, code_regex="")
+            except httpx.HTTPError as exc:
+                log(f"查询邮件失败（{exc}），{backoff:.0f}s 后重试。")
+                sleep(backoff)
+                backoff = min(backoff * 2, 4.0)
+                continue
+            backoff = 1.0
+
+            for email in emails:
+                link = extract_magic_link(email)
+                if not link:
+                    continue
+                who = magic_link_recipient(link)
+                if who and who != target:
+                    log(f"跳过收件人不匹配的链接（{who}）。")
+                    continue
+                return link
+
+            sleep(interval)
+
+        return None
+```
+
+`browser.py` 加：
+
+```python
+def open_magic_link(page: Page, link: str) -> bool:
+    """打开魔术登录链接完成登录。返回 False 表示打开失败。"""
+    try:
+        page.goto(link, wait_until="domcontentloaded", timeout=60_000)
+        log("已打开登录链接。")
+    except Exception as exc:
+        log(f"打开登录链接失败（{exc}）。")
+        return False
+    return True
+```
+
+`flow.py` 编排改为优先魔术链接（替换原来 `code` 那一段）：
+
+```python
+            link: str | None = None
+            code: str | None = None
+            if code_timeout > 0:
+                link = client.poll_magic_link(
+                    to=mailbox.email, since=since, timeout=code_timeout
+                )
+                if link is None:
+                    # 退一步试试 6 位码——Claude 的 UI 里存在这条路径
+                    log("未收到登录链接，改试 6 位验证码。")
+                    code = client.poll_code(
+                        to=mailbox.email, since=since, timeout=30.0
+                    )
+            else:
+                log("--login-timeout 0，跳过等待邮件。")
+
+            if link:
+                banner("已收到登录链接")
+                log(link)
+                if not auto_login:
+                    log("--no-auto-login，请自己打开上面的链接。")
+                elif open_magic_link(page, link):
+                    page.wait_for_timeout(3_000)
+                    screenshot(page, "after_magic_link.png")
+                    log(f"当前地址：{page.url}")
+                else:
+                    log("打开链接失败，请手动复制上面的链接到浏览器。")
+            elif code:
+                banner(f"验证码：{code}")
+                ...（保留原有填码分支）
+            else:
+                log("既没收到登录链接，也没收到验证码。")
+                screenshot(page, "no_mail.png")
+                _report_manual_fallback(mailbox, client)
+```
+
+`main.py`：`--no-auto-code` 改名 `--no-auto-login`，`--code-timeout` 改名 `--login-timeout`（保留旧名做别名，避免破坏已有用法）。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+```bash
+uv run pytest tests/ -v
+```
+
+预期：原有 45 + 新增约 12 个全 PASS。
+
+- [ ] **Step 5: 实跑验证**
+
+```bash
+CLAUDE_REGISTER_NO_PAUSE=1 uv run main.py -d ckvlhj.xyz < /dev/null
+```
+
+**验收标准：横幅打印出真实的魔术链接，并自动打开完成登录。**
+
+Cloudflare 若仍卡住则属环境阻塞，不算代码缺陷——如实记录。**魔术链接这条路绕过了填码和 hCaptcha 整条路径**，所以一旦 Cloudflare 放行，理论上可以全自动。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add -A
+git commit -m "feat: 改为提取并打开魔术登录链接，修掉兜底正则的 CSS 颜色假阳性"
 ```
 
 ---

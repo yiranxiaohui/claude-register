@@ -1,243 +1,171 @@
-﻿"""Claude login flow via AnyMail. Entry: main.py"""
+"""编排：选后缀 → 建邮箱 → 填邮箱 → 优先等魔术登录链接（拿不到再退回接码）→ 打开/填入。入口 main.py"""
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
-from playwright.sync_api import Page, expect, sync_playwright
+from playwright.sync_api import sync_playwright
 
 from claude_register.anymail import AnyMailClient, Mailbox, load_dotenv
+from claude_register.browser import (
+    fill_code,
+    fill_email,
+    hcaptcha_visible,
+    launch_browser,
+    new_page,
+    open_login,
+    open_magic_link,
+    pause_for_user,
+    screenshot,
+    wait_code_screen,
+    wait_login_form,
+)
+from claude_register.console import banner, log
+from claude_register.mailbox import prepare_mailbox
 
-URL = "https://claude.ai/login"
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
-
-
-def log(msg: str) -> None:
-    print(msg, flush=True)
-
-
-def open_login(page: Page) -> None:
-    log(f"正在打开：{URL}")
-    page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
-    log(f"页面标题：{page.title()}")
-    log(f"当前地址：{page.url}")
-
-
-def wait_login_form(page: Page, timeout_ms: int = 120_000) -> None:
-    """等待邮箱输入框出现；Cloudflare 验证期间会轮询并打印状态。"""
-    email_box = page.get_by_placeholder("Enter your email")
-    step = 3_000
-    waited = 0
-    while waited < timeout_ms:
-        try:
-            if email_box.is_visible():
-                log("登录表单已出现。")
-                return
-        except Exception:
-            pass
-        title = ""
-        try:
-            title = page.title()
-        except Exception:
-            title = "(无法读取标题)"
-        log(f"等待登录表单… {waited // 1000}s 标题={title!r} url={page.url}")
-        page.wait_for_timeout(step)
-        waited += step
-    shot = OUTPUT_DIR / "waiting_login.png"
-    page.screenshot(path=shot)
-    raise RuntimeError(
-        f"登录表单未出现（可能卡在 Cloudflare 验证页）。已截图：{shot}"
-    )
+# 验证码兜底轮询最多占用总预算（--login-timeout）的这一比例，且不超过下面的上限秒数——
+# 两者取较小值，剩下的预算都留给魔术链接轮询，这样 --login-timeout 才是「总等待时长」的
+# 真实上限，而不是「魔术链接超时 + 额外 30 秒」。
+FALLBACK_CODE_TIMEOUT_FRACTION = 0.25
+FALLBACK_CODE_TIMEOUT_CAP = 30.0
 
 
-def fill_email(page: Page, email: str) -> None:
-    email_box = page.get_by_placeholder("Enter your email")
-    expect(email_box).to_be_visible(timeout=10_000)
-    email_box.click()
-    email_box.fill("")
-    email_box.press_sequentially(email, delay=30)
-    log(f"已填入邮箱：{email}")
-
-    continue_btn = page.get_by_role("button", name="Continue with email")
-    expect(continue_btn).to_be_enabled(timeout=10_000)
-    continue_btn.click()
-    log("已点击 Continue with email")
+def _split_login_timeout(total: float) -> tuple[float, float]:
+    """把总等待预算拆成 (魔术链接超时, 验证码兜底超时)，两者之和不超过 total。"""
+    fallback = min(FALLBACK_CODE_TIMEOUT_CAP, total * FALLBACK_CODE_TIMEOUT_FRACTION)
+    link = max(0.0, total - fallback)
+    return link, fallback
 
 
-def launch_browser(p):
-    common = {
-        "headless": False,
-        "args": ["--disable-blink-features=AutomationControlled"],
-    }
-    try:
-        browser = p.chromium.launch(channel="chrome", **common)
-        log("已启动本机 Chrome（channel=chrome）")
-        return browser
-    except Exception as exc:
-        log(f"本机 Chrome 不可用（{exc}），回退到 Playwright Chromium")
-        return p.chromium.launch(**common)
+def _report_manual_fallback(mailbox: Mailbox, client: AnyMailClient) -> None:
+    """降级时必须让用户拿到继续操作所需的一切。
+
+    Claude 发的几乎都是登录链接，不是验证码——即便脚本这边判定超时，
+    链接也可能是最后一刻才到，去后台先找登录链接，验证码只是次要可能。
+    """
+    banner(f"邮箱：{mailbox.email}")
+    log(f"AnyMail 后台：{client.base_url}")
+    log("可以去后台查收登录链接（Secure link to log in），复制到浏览器打开；"
+        "如果收到的是验证码，也可以在浏览器里手动填入。")
 
 
-def _prompt(msg: str) -> str:
-    try:
-        return input(msg).strip()
-    except EOFError:
-        return ""
-
-
-def choose_domain(client: AnyMailClient, preferred: str | None = None) -> str:
-    if preferred:
-        return preferred.strip().lstrip("@").strip(".").lower()
-
-    if client.domain:
-        return client.domain
-
-    domains = client.list_domains()
-    if not domains:
-        raise ValueError(
-            "没有可用域名。请在 .env 设置 ANYMAIL_DOMAIN，或给 API Key 加上 domains:read。"
-        )
-    if len(domains) == 1:
-        log(f"使用唯一域名：{domains[0]}")
-        return domains[0]
-
-    log("可用域名：")
-    for i, dom in enumerate(domains, start=1):
-        log(f"  [{i}] {dom}")
-    while True:
-        raw = _prompt("请选择域名编号（直接回车=1）：")
-        if not raw:
-            return domains[0]
-        if raw.isdigit() and 1 <= int(raw) <= len(domains):
-            return domains[int(raw) - 1]
-        log("输入无效，请重试。")
-
-
-def create_custom_mailbox(client: AnyMailClient, domain: str | None = None) -> Mailbox:
-    dom = choose_domain(client, domain)
-    while True:
-        local = _prompt(f"请输入邮箱前缀（将使用 @{dom}）：").strip().lower()
-        if not local:
-            log("前缀不能为空。")
-            continue
-        if "@" in local:
-            log("只需输入 @ 前面的部分。")
-            continue
-        email = f"{local}@{dom}"
-        log(f"将使用：{email}")
-        return client.get_or_create_mailbox(email)
-
-
-def choose_mailbox(
+def run_browser(
     client: AnyMailClient,
+    mailbox: Mailbox,
+    since: str,
     *,
-    email: str | None = None,
-    domain: str | None = None,
-    create_new: bool = False,
-) -> Mailbox:
-    """选择邮箱：命令行指定 / 列表选择 / 自定义新建。"""
-    if email:
-        box = client.get_or_create_mailbox(email)
-        log(f"使用指定邮箱：{box.email} (id={box.id or 'new'})")
-        return box
-
-    if create_new:
-        return create_custom_mailbox(client, domain)
-
-    accounts: list[Mailbox] = []
-    try:
-        accounts = client.list_accounts(limit=100)
-    except Exception as exc:
-        log(f"无法列出已有邮箱（{exc}），改为新建。")
-        return create_custom_mailbox(client, domain)
-
-    if not accounts:
-        log("AnyMail 中暂无已有邮箱，改为新建。")
-        return create_custom_mailbox(client, domain)
-
-    log("请选择邮箱：")
-    for i, box in enumerate(accounts, start=1):
-        extra = []
-        if box.tag:
-            extra.append(f"tag={box.tag}")
-        if box.expires_at:
-            extra.append(f"exp={box.expires_at}")
-        suffix = f" ({', '.join(extra)})" if extra else ""
-        log(f"  [{i}] {box.email}{suffix}")
-    log("  [N] 新建自定义邮箱")
-    log("  [直接输入完整邮箱地址]")
-
-    while True:
-        raw = _prompt("请输入编号 / N / 邮箱：")
-        if not raw:
-            log("请输入有效选项。")
-            continue
-        if raw.lower() in {"n", "new"}:
-            return create_custom_mailbox(client, domain)
-        if raw.isdigit() and 1 <= int(raw) <= len(accounts):
-            box = accounts[int(raw) - 1]
-            log(f"已选择：{box.email}")
-            return box
-        if "@" in raw:
-            box = client.get_or_create_mailbox(raw)
-            log(f"已选择/创建：{box.email}")
-            return box
-        log("输入无效，请重试。")
-
-
-def run_browser(email: str) -> None:
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    auto_login: bool,
+    code_timeout: float,
+) -> None:
     with sync_playwright() as p:
         browser = launch_browser(p)
-        context = browser.new_context(
-            locale="en-US",
-            viewport={"width": 1280, "height": 900},
-        )
-        page = context.new_page()
-        page.set_default_timeout(30_000)
+        context, page = new_page(browser)
+        try:
+            open_login(page)
+            wait_login_form(page)
+            fill_email(page, mailbox.email)
 
-        open_login(page)
-        wait_login_form(page)
-        fill_email(page, email)
+            screen_ok = wait_code_screen(page)
+            if not screen_ok:
+                # wait_code_screen 返回 False 有两种可能：真超时（页面还活着）或者
+                # 页面/上下文已经死掉；后一种情况下这个 screenshot 会直接抛
+                # TargetClosedError。绝不能让它抢在 poll_magic_link 之前把整个
+                # run_browser 打断——接邮件才是这里真正有价值的部分，一次截图失败
+                # 不该浪费掉已经建好的邮箱。
+                try:
+                    screenshot(page, "code_screen_missing.png")
+                except Exception as exc:
+                    log(f"截图失败（{exc}），忽略，继续等待邮件。")
+                log("验证码界面未出现，但仍继续等待——魔术链接/验证码本身有价值。")
 
-        page.wait_for_timeout(2_000)
-        shot = OUTPUT_DIR / "email_filled.png"
-        page.screenshot(path=shot, full_page=True)
-        log(f"截图已保存：{shot}")
-        log(f"当前地址：{page.url}")
-        log(f"页面标题：{page.title()}")
+            link_timeout, fallback_timeout = _split_login_timeout(code_timeout)
+            link: str | None = None
+            code: str | None = None
+            if code_timeout > 0:
+                link = client.poll_magic_link(
+                    to=mailbox.email, since=since, timeout=link_timeout
+                )
+                if link is None:
+                    # 退一步试试 6 位码——Claude 的 UI 里存在这条路径。超时从
+                    # --login-timeout 的总预算里扣除，不能在它之外再固定多等一段。
+                    log(f"未收到登录链接，改试 6 位验证码（最多 {fallback_timeout:.0f}s）。")
+                    code = client.poll_code(
+                        to=mailbox.email, since=since, timeout=fallback_timeout
+                    )
+            else:
+                log("--login-timeout 0，跳过等待邮件。")
 
-        if os.getenv("CLAUDE_REGISTER_NO_PAUSE", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-        }:
-            log("CLAUDE_REGISTER_NO_PAUSE=1，跳过手动暂停。")
-        else:
-            input("浏览器保持打开。看完后在终端按回车关闭…")
+            try:
+                if link:
+                    banner("已收到登录链接")
+                    log(link)
+                    if not auto_login:
+                        log("--no-auto-login，请自己打开上面的链接。")
+                    elif open_magic_link(page, link):
+                        page.wait_for_timeout(3_000)
+                        screenshot(page, "after_magic_link.png")
+                        log(f"当前地址：{page.url}")
+                    else:
+                        log("打开链接失败，请手动复制上面的链接到浏览器。")
+                elif code:
+                    banner(f"验证码：{code}")
+                    if not auto_login:
+                        log("--no-auto-login，请手动填入上面的验证码。")
+                    elif not screen_ok:
+                        log("验证码界面未确认出现，请手动填入上面的验证码。")
+                    elif not fill_code(page, code):
+                        log("填码框定位不到，请手动填入上面的验证码。")
+                        screenshot(page, "fill_code_failed.png")
+                    else:
+                        page.wait_for_timeout(3_000)
+                        screenshot(page, "after_code.png")
+                        if hcaptcha_visible(page):
+                            screenshot(page, "hcaptcha.png")
+                            banner("需要人工拖拽 hCaptcha 验证")
+                            log("提交验证码后弹出了 hCaptcha 拖拽题（Task 6 已知现象）。")
+                            log("请在浏览器里手动完成拖拽，脚本不会自动绕过。")
+                        log(f"当前地址：{page.url}")
+                else:
+                    log("既没收到登录链接，也没收到验证码。")
+                    screenshot(page, "no_mail.png")
+                    _report_manual_fallback(mailbox, client)
+            except Exception as exc:
+                # 到这一步，链接/验证码已经从邮箱里取出来了——而且不能重新获取
+                # （魔术链接一次性；邮箱不会再收到新邮件）。哪怕这里的收尾动作
+                # （截图、读 URL 之类）出错，也绝不能让异常直接冲到 finally 把浏览器
+                # 关掉，那样等于凭空浪费一个可能已经登录成功、无法再拿一次的凭证。
+                log(f"登录后续操作出错（{exc}），但凭证已经取出且无法重新获取，"
+                    "浏览器会保持打开，请手动检查当前页面状态。")
 
-        context.close()
-        browser.close()
+            pause_for_user()
+        finally:
+            context.close()
+            browser.close()
 
 
 def run(
     *,
     email: str | None = None,
     domain: str | None = None,
-    create_new: bool = False,
+    auto_login: bool = True,
+    code_timeout: float = 120.0,
 ) -> None:
     load_dotenv()
+    if email and domain:
+        log("已指定 --email，忽略 --domain（邮箱已含后缀）。")
+
     client = AnyMailClient(domain=domain)
-    mailbox = choose_mailbox(
+    mailbox, since = prepare_mailbox(client, email=email, domain=domain)
+    log(f"本次邮箱：{mailbox.email} (id={mailbox.id or 'new'})")
+
+    run_browser(
         client,
-        email=email,
-        domain=domain,
-        create_new=create_new,
+        mailbox,
+        since,
+        auto_login=auto_login,
+        code_timeout=code_timeout,
     )
-    log(f"最终邮箱：{mailbox.email} (id={mailbox.id})")
-    run_browser(mailbox.email)
+
     log("完成。")
-    log(f"本次邮箱：{mailbox.email}")
+    banner(f"邮箱：{mailbox.email}")
     if mailbox.id:
         log(f"邮箱 id：{mailbox.id}")
+    log("提示：邮箱默认 24 小时后被 AnyMail 清理，若要长期收信请调整有效期。")
