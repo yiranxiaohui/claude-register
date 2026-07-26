@@ -156,8 +156,17 @@ def wait_code_screen(page: Page, timeout_ms: int = 60_000) -> bool:
         if _code_input(page) is not None:
             log("验证码界面已出现。")
             return True
-        log(f"等待验证码界面… {waited // 1000}s url={page.url}")
-        page.wait_for_timeout(step)
+        try:
+            current_url = page.url
+        except Exception as exc:
+            log(f"页面或上下文不可用（{exc}），停止等待。")
+            return False
+        log(f"等待验证码界面… {waited // 1000}s url={current_url}")
+        try:
+            page.wait_for_timeout(step)
+        except Exception as exc:
+            log(f"等待期间页面或上下文失效（{exc}），停止等待。")
+            return False
         waited += step
     log("验证码界面未在超时内出现。")
     return False
@@ -169,6 +178,9 @@ def hcaptcha_visible(page: Page) -> bool:
     Task 6 实测：点提交会触发 api.hcaptcha.com/getcaptcha，并弹出拖拽题。
     这里只负责如实告知调用方，不尝试自动绕过。
     """
+    # 注意：以下选择器是根据实测的请求 URL（api.hcaptcha.com/getcaptcha/...、a-cdn.claude.ai/fc/gt2/public_key/...）
+    # 和 hCaptcha 惯例推断出来的，但后提交弹窗的 HTML 未曾被捕获 dump，因此不是从 DOM 实测得出。
+    # Task 8 用真实验证码时应重点关注这些选择器是否准确。
     for sel in (
         "iframe[src*='hcaptcha.com']",
         "iframe[title*='hCaptcha']",
