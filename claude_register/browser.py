@@ -95,3 +95,126 @@ def pause_for_user() -> None:
         log("CLAUDE_REGISTER_NO_PAUSE=1，跳过手动暂停。")
         return
     prompt("浏览器保持打开。看完后在终端按回车关闭…")
+
+
+def _code_input(page: Page):
+    """定位验证码输入框。Task 6 实测：单个 input，data-testid="code" 最稳。
+
+    找不到返回 None（调用方降级，不抛异常）。
+    """
+    try:
+        box = page.get_by_test_id("code")
+        if box.count() >= 1 and box.first.is_visible():
+            return box.first
+    except Exception:
+        pass
+    # 兜底：data-testid 若改版，用同一元素的另外两个稳定属性
+    for build in (
+        lambda: page.locator("input[autocomplete='one-time-code']"),
+        lambda: page.get_by_label("Login code"),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return loc.first
+        except Exception:
+            continue
+    return None
+
+
+def _reveal_code_input(page: Page) -> bool:
+    """点掉中间态的「Enter verification code」按钮，把验证码输入框展开出来。
+
+    Task 6 实测：fill_email 之后先落在一个 0 个 input 的提示界面，
+    必须点这个按钮才会出现输入框。已经在验证码界面时直接返回 True。
+    """
+    if _code_input(page) is not None:
+        return True
+    try:
+        btn = page.get_by_test_id("enter-code")
+        if btn.count() >= 1 and btn.first.is_visible():
+            btn.first.click()
+            log("已点击 Enter verification code")
+            return True
+    except Exception as exc:
+        log(f"点击 Enter verification code 失败（{exc}）。")
+    return False
+
+
+def wait_code_screen(page: Page, timeout_ms: int = 60_000) -> bool:
+    """等验证码输入框出现，中途自动点掉中间态按钮。
+
+    返回 False 表示没等到（调用方降级，不抛异常）。
+    """
+    step = 2_000
+    waited = 0
+    while waited < timeout_ms:
+        if _code_input(page) is not None:
+            log("验证码界面已出现。")
+            return True
+        _reveal_code_input(page)
+        if _code_input(page) is not None:
+            log("验证码界面已出现。")
+            return True
+        log(f"等待验证码界面… {waited // 1000}s url={page.url}")
+        page.wait_for_timeout(step)
+        waited += step
+    log("验证码界面未在超时内出现。")
+    return False
+
+
+def hcaptcha_visible(page: Page) -> bool:
+    """检测提交后是否弹了 hCaptcha 拖拽验证。
+
+    Task 6 实测：点提交会触发 api.hcaptcha.com/getcaptcha，并弹出拖拽题。
+    这里只负责如实告知调用方，不尝试自动绕过。
+    """
+    for sel in (
+        "iframe[src*='hcaptcha.com']",
+        "iframe[title*='hCaptcha']",
+        "iframe[src*='/fc/gt2/']",
+    ):
+        try:
+            loc = page.locator(sel)
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def fill_code(page: Page, code: str) -> bool:
+    """填验证码并提交。返回 False 表示填不进去（调用方打印验证码让人手填）。"""
+    box = _code_input(page)
+    if box is None:
+        log("找不到验证码输入框。")
+        return False
+
+    try:
+        box.click()
+        box.fill("")
+        box.press_sequentially(code, delay=50)
+        log(f"已填入验证码：{code}")
+    except Exception as exc:
+        log(f"填验证码失败（{exc}）。")
+        return False
+
+    return _submit_code(page)
+
+
+def _submit_code(page: Page) -> bool:
+    """点提交按钮。Task 6 实测：data-testid="continue"，不会自动提交。
+
+    注意：提交按钮的 disabled 恒为 False，不能用它判断输入是否填满。
+    """
+    try:
+        btn = page.get_by_test_id("continue")
+        if btn.count() >= 1 and btn.first.is_visible():
+            btn.first.click()
+            log("已点击提交（Verify Email Address）")
+            return True
+    except Exception as exc:
+        log(f"点击提交按钮失败（{exc}）。")
+        return False
+    log("未找到提交按钮。")
+    return False
