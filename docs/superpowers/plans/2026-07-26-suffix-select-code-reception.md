@@ -1946,6 +1946,396 @@ git commit -m "docs: 更新 README 与 .env.example 说明新流程"
 
 ---
 
+### Task 10: 改为提取并打开魔术链接（推翻接码前提）
+
+**Files:**
+- Modify: `claude_register/config.py`（正则）
+- Modify: `claude_register/anymail.py`（新增 `extract_magic_link` + `poll_magic_link`）
+- Modify: `claude_register/browser.py`（新增 `open_magic_link`）
+- Modify: `claude_register/flow.py`（改编排：优先魔术链接）
+- Modify: `main.py`（flag 更名）
+- Test: `tests/test_magic_link.py`
+
+**Interfaces:**
+- Consumes: `AnyMailClient._fetch_latest`、`console.log`
+- Produces:
+  - `MAGIC_LINK_REGEX: str`
+  - `extract_magic_link(email: dict) -> str | None`
+  - `AnyMailClient.poll_magic_link(*, to, since, timeout=120.0, interval=3.0, sleep=..., monotonic=...) -> str | None`
+  - `open_magic_link(page, link: str) -> bool`
+
+> **为什么有这个 task：** Task 8 实跑受阻后，控制端绕过浏览器直接查了 AnyMail 上约 40 封真实 Claude 登录邮件，发现**本计划的核心前提是错的**。
+
+**实测证据（控制端在 100 个邮箱上扫描）：**
+
+1. **Claude 不发 6 位验证码，发的是魔术链接。** 所有登录邮件标题都是 `Secure link to log in to Claude.ai | <时间>` 或 `Your secure link to Claude.ai is here | <时间>`，正文里是：
+   ```
+   https://claude.ai/magic-link#<32位hex token>:<base64(收件邮箱)>
+   ```
+   **没有任何一封里有 6 位验证码。** 所以 `poll_code` 再怎么写也不可能命中。
+
+2. **`text_body` 是空的**（`len=0`），链接只存在于 `html_body`（约 9KB）。提取必须搜 `html_body`，且**必须先 `html.unescape`**——链接在正文里是 HTML 转义过的。
+
+3. **兜底正则 `\b(\d{6})\b` 会产生假阳性，而且是危险的那种。** 实测命中 `000000`、`737163`、`262624`——上下文证明它们是 CSS 十六进制颜色（`bgcolor="#000000"`、`color: #737163`，`#262624` 是 Claude 品牌色）。`fill_code` 会把颜色值填进验证码框并报告"成功"。**静默填错比直接失败更糟**，必须修掉。
+
+4. **链接结构自带校验：** base64 尾巴解出来就是收件邮箱，与目标邮箱比对即可确认没抓错邮件。
+
+**保留 `poll_code` 不删** —— Task 6 确实在 UI 上看到过验证码输入框（`data-testid="code"`），说明 Claude 存在验证码流程，只是这些邮箱收到的是链接邮件。什么条件触发码邮件尚未查明，留着以备后用，但默认路径改走魔术链接。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/test_magic_link.py`：
+
+```python
+"""魔术链接提取与轮询。"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+import respx
+
+from claude_register.anymail import extract_magic_link
+
+LATEST = "https://mail.test/api/emails/latest"
+
+# 真实邮件片段（控制端从 AnyMail 实测抓取，链接在 html_body 里且被 HTML 转义）
+REAL_HTML = (
+    '<td align="center" bgcolor="#000000" role="presentation">'
+    '<a href="https://claude.ai/magic-link#db3b0fc94f6475dbeae9b4d6ee1fea14:'
+    'Y2xhdWRlX2FhZmRiZTI1QGNrdmxoai54eXo=" '
+    'style="color: #737163;">Log in to Claude.ai</a></td>'
+)
+REAL_LINK = (
+    "https://claude.ai/magic-link#db3b0fc94f6475dbeae9b4d6ee1fea14:"
+    "Y2xhdWRlX2FhZmRiZTI1QGNrdmxoai54eXo="
+)
+
+
+def _email(**kw) -> dict:
+    base = {"subject": "", "text_body": "", "html_body": "", "code": None}
+    base.update(kw)
+    return base
+
+
+def test_extract_from_real_html_body():
+    assert extract_magic_link(_email(html_body=REAL_HTML)) == REAL_LINK
+
+
+def test_extract_handles_html_escaped_amp():
+    """真实邮件里 & 会被转义成 &amp;，提取前必须 unescape。"""
+    escaped = REAL_HTML.replace("magic-link#", "magic-link#") + "&amp;utm=1"
+    assert extract_magic_link(_email(html_body=escaped)) == REAL_LINK
+
+
+def test_extract_searches_text_body_too():
+    assert extract_magic_link(_email(text_body=f"Click {REAL_LINK} to log in")) == REAL_LINK
+
+
+def test_extract_returns_none_without_link():
+    assert extract_magic_link(_email(html_body="<p>no link here</p>")) is None
+
+
+def test_extract_ignores_other_claude_urls():
+    """普通 claude.ai 链接不能误当成魔术链接。"""
+    html = '<a href="https://claude.ai/login">Log in</a><a href="https://claude.ai/pricing">Pricing</a>'
+    assert extract_magic_link(_email(html_body=html)) is None
+
+
+def test_extract_recipient_from_link():
+    """base64 尾巴解出收件邮箱——用来确认没抓错邮件。"""
+    from claude_register.anymail import magic_link_recipient
+
+    assert magic_link_recipient(REAL_LINK) == "claude_aafdbe25@ckvlhj.xyz"
+
+
+def test_extract_recipient_handles_garbage():
+    from claude_register.anymail import magic_link_recipient
+
+    assert magic_link_recipient("https://claude.ai/magic-link#abc") is None
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@respx.mock
+def test_poll_magic_link_hit_first_round(client):
+    respx.get(LATEST).mock(
+        return_value=httpx.Response(200, json={"emails": [_email(html_body=REAL_HTML)]})
+    )
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="claude_aafdbe25@ckvlhj.xyz",
+        since="2026-07-26T00:00:00Z",
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link == REAL_LINK
+    assert clock.slept == []
+
+
+@respx.mock
+def test_poll_magic_link_timeout_returns_none(client):
+    respx.get(LATEST).mock(return_value=httpx.Response(200, json={"emails": []}))
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="a@mail.test",
+        since="2026-07-26T00:00:00Z",
+        timeout=10.0,
+        interval=3.0,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link is None
+    assert clock.now >= 10.0
+
+
+@respx.mock
+def test_poll_magic_link_skips_wrong_recipient(client):
+    """抓到别人的链接必须跳过，不能拿去登录错的账号。"""
+    other = _email(
+        html_body='<a href="https://claude.ai/magic-link#deadbeef:b3RoZXJAbWFpbC50ZXN0">x</a>'
+    )
+    respx.get(LATEST).mock(
+        side_effect=[
+            httpx.Response(200, json={"emails": [other]}),
+            httpx.Response(200, json={"emails": [_email(html_body=REAL_HTML)]}),
+        ]
+    )
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="claude_aafdbe25@ckvlhj.xyz",
+        since="2026-07-26T00:00:00Z",
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link == REAL_LINK
+
+
+@respx.mock
+def test_poll_magic_link_backoff_on_5xx(client):
+    respx.get(LATEST).mock(
+        side_effect=[
+            httpx.Response(503, text="down"),
+            httpx.Response(200, json={"emails": [_email(html_body=REAL_HTML)]}),
+        ]
+    )
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="claude_aafdbe25@ckvlhj.xyz",
+        since="2026-07-26T00:00:00Z",
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link == REAL_LINK
+    assert clock.slept == [1.0]
+```
+
+`tests/test_config.py` 追加一条——钉住那个假阳性：
+
+```python
+def test_fallback_regex_ignores_css_hex_colors():
+    """实测过的坑：邮件 HTML 里的 #000000 / #737163 会被裸 \\d{6} 当成验证码。"""
+    from claude_register.anymail import extract_code
+    from claude_register.config import FALLBACK_CODE_REGEX
+
+    html = '<td bgcolor="#000000" style="color: #737163;">Log in</td>'
+    assert extract_code({"html_body": html}, FALLBACK_CODE_REGEX) is None
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+```bash
+uv run pytest tests/test_magic_link.py -v
+```
+
+预期：FAIL — `ImportError: cannot import name 'extract_magic_link'`
+
+- [ ] **Step 3: 实现**
+
+`config.py` 加正则，并修掉兜底正则的假阳性：
+
+```python
+# 魔术链接：https://claude.ai/magic-link#<32位hex>:<base64(邮箱)>
+MAGIC_LINK_REGEX = r"https://claude\.ai/magic-link#[A-Za-z0-9+/=:._-]+"
+
+# 兜底正则：要求 6 位数字前面不是 #，避开邮件 HTML 里的 CSS 颜色值
+# （实测坑：#000000 / #737163 / #262624 都会被裸 \b\d{6}\b 命中）
+FALLBACK_CODE_REGEX = r"(?<![#0-9A-Fa-f])\b(\d{6})\b"
+```
+
+`anymail.py` 加两个模块级函数：
+
+```python
+def magic_link_recipient(link: str) -> str | None:
+    """从魔术链接尾部的 base64 解出收件邮箱；解不出返回 None。"""
+    frag = link.partition("#")[2]
+    b64 = frag.partition(":")[2]
+    if not b64:
+        return None
+    try:
+        pad = "=" * (-len(b64) % 4)
+        email = base64.b64decode(b64 + pad).decode("utf-8", "replace")
+    except Exception:
+        return None
+    return email.strip().lower() if "@" in email else None
+
+
+def extract_magic_link(email: dict[str, Any]) -> str | None:
+    """从邮件里提取 Claude 魔术登录链接。
+
+    实测：链接只在 html_body 里（text_body 为空），且是 HTML 转义过的，
+    所以必须先 unescape 再匹配。
+    """
+    pattern = re.compile(MAGIC_LINK_REGEX)
+    for field in ("text_body", "html_body", "subject"):
+        raw = email.get(field) or ""
+        match = pattern.search(unescape(str(raw)))
+        if match:
+            return match.group(0).rstrip("&")
+    return None
+```
+
+顶部补 `import base64` 和 `from html import unescape`，以及 `from claude_register.config import MAGIC_LINK_REGEX`。
+
+`AnyMailClient` 加方法（与 `poll_code` 同构，复用 `_fetch_latest`）：
+
+```python
+    def poll_magic_link(
+        self,
+        *,
+        to: str,
+        since: str,
+        timeout: float = 120.0,
+        interval: float = 3.0,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> str | None:
+        """轮询直到拿到魔术登录链接；超时返回 None。
+
+        只接受 base64 尾巴解出来等于 to 的链接——避免抓错别的邮箱的邮件。
+        """
+        target = to.strip().lower()
+        deadline = monotonic() + timeout
+        backoff = 1.0
+
+        log(f"开始等待登录链接：{to}（超时 {timeout:.0f}s，每 {interval:.0f}s 一次）")
+        while monotonic() < deadline:
+            try:
+                emails = self._fetch_latest(to=to, since=since, code_regex="")
+            except httpx.HTTPError as exc:
+                log(f"查询邮件失败（{exc}），{backoff:.0f}s 后重试。")
+                sleep(backoff)
+                backoff = min(backoff * 2, 4.0)
+                continue
+            backoff = 1.0
+
+            for email in emails:
+                link = extract_magic_link(email)
+                if not link:
+                    continue
+                who = magic_link_recipient(link)
+                if who and who != target:
+                    log(f"跳过收件人不匹配的链接（{who}）。")
+                    continue
+                return link
+
+            sleep(interval)
+
+        return None
+```
+
+`browser.py` 加：
+
+```python
+def open_magic_link(page: Page, link: str) -> bool:
+    """打开魔术登录链接完成登录。返回 False 表示打开失败。"""
+    try:
+        page.goto(link, wait_until="domcontentloaded", timeout=60_000)
+        log("已打开登录链接。")
+    except Exception as exc:
+        log(f"打开登录链接失败（{exc}）。")
+        return False
+    return True
+```
+
+`flow.py` 编排改为优先魔术链接（替换原来 `code` 那一段）：
+
+```python
+            link: str | None = None
+            code: str | None = None
+            if code_timeout > 0:
+                link = client.poll_magic_link(
+                    to=mailbox.email, since=since, timeout=code_timeout
+                )
+                if link is None:
+                    # 退一步试试 6 位码——Claude 的 UI 里存在这条路径
+                    log("未收到登录链接，改试 6 位验证码。")
+                    code = client.poll_code(
+                        to=mailbox.email, since=since, timeout=30.0
+                    )
+            else:
+                log("--login-timeout 0，跳过等待邮件。")
+
+            if link:
+                banner("已收到登录链接")
+                log(link)
+                if not auto_login:
+                    log("--no-auto-login，请自己打开上面的链接。")
+                elif open_magic_link(page, link):
+                    page.wait_for_timeout(3_000)
+                    screenshot(page, "after_magic_link.png")
+                    log(f"当前地址：{page.url}")
+                else:
+                    log("打开链接失败，请手动复制上面的链接到浏览器。")
+            elif code:
+                banner(f"验证码：{code}")
+                ...（保留原有填码分支）
+            else:
+                log("既没收到登录链接，也没收到验证码。")
+                screenshot(page, "no_mail.png")
+                _report_manual_fallback(mailbox, client)
+```
+
+`main.py`：`--no-auto-code` 改名 `--no-auto-login`，`--code-timeout` 改名 `--login-timeout`（保留旧名做别名，避免破坏已有用法）。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+```bash
+uv run pytest tests/ -v
+```
+
+预期：原有 45 + 新增约 12 个全 PASS。
+
+- [ ] **Step 5: 实跑验证**
+
+```bash
+CLAUDE_REGISTER_NO_PAUSE=1 uv run main.py -d ckvlhj.xyz < /dev/null
+```
+
+**验收标准：横幅打印出真实的魔术链接，并自动打开完成登录。**
+
+Cloudflare 若仍卡住则属环境阻塞，不算代码缺陷——如实记录。**魔术链接这条路绕过了填码和 hCaptcha 整条路径**，所以一旦 Cloudflare 放行，理论上可以全自动。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add -A
+git commit -m "feat: 改为提取并打开魔术登录链接，修掉兜底正则的 CSS 颜色假阳性"
+```
+
+---
+
 ## Self-Review
 
 **Spec 覆盖检查：**
