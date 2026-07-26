@@ -1232,7 +1232,7 @@ def run_browser(email: str) -> None:
         browser.close()
 ```
 
-`flow.py` 里 `choose_domain` / `create_custom_mailbox` / `choose_mailbox` 暂时保留（Task 7 删）。把它们里的 `_prompt` 调用改成 `prompt`。
+`flow.py` 里 `choose_domain` / `create_custom_mailbox` / `choose_mailbox` 暂时保留（**Task 8 重写 flow.py 时删除**）。把它们里的 `_prompt` 调用改成 `prompt`。
 
 - [ ] **Step 3: 验证 import 无环、无语法错**
 
