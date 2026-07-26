@@ -891,26 +891,40 @@ def test_create_for_suffix_permanent_when_expires_zero(client, monkeypatch):
 
 
 @respx.mock
-def test_prepare_mailbox_records_since_before_create(client):
+def test_prepare_mailbox_records_since_before_create(client, monkeypatch):
     """接码文档 §8.2：since 必须早于 POST /api/accounts，
-    否则会漏掉「建邮箱完成 → 首次轮询」窗口里到达的邮件。"""
-    observed: list[str] = []
+    否则会漏掉「建邮箱完成 → 首次轮询」窗口里到达的邮件。
+
+    注意：不要用 `assert since <= utc_now_iso()` —— 那个断言恒真，
+    无论 since 在建邮箱前还是后记录都会通过，测不出这个回归。
+    必须用严格递增的假时钟，在请求发生的那一刻读一次，证明因果顺序。
+    """
+    from claude_register import mailbox as mailbox_mod
+
+    ticks: list[str] = []
+
+    def fake_clock() -> str:
+        ticks.append(f"2026-07-26T00:00:{len(ticks):02d}Z")
+        return ticks[-1]
+
+    monkeypatch.setattr(mailbox_mod, "utc_now_iso", fake_clock)
+
+    request_ticks: list[str] = []
 
     def _capture(request):
-        observed.append("post")
+        # 在请求真正发出的这一刻读时钟
+        request_ticks.append(fake_clock())
         return httpx.Response(200, json=_account("claude_x@mail.test"))
 
     respx.post(ACCOUNTS).mock(side_effect=_capture)
 
     box, since = prepare_mailbox(client, domain="mail.test")
 
-    assert observed == ["post"]
     assert box.email == "claude_x@mail.test"
     assert since.endswith("Z")
-    # since 必须是建邮箱之前的时刻：重新取 now 一定不早于它
-    from claude_register.mailbox import utc_now_iso
-
-    assert since <= utc_now_iso()
+    # since 必须是整个用例里最先被读到的刻度，且严格早于建邮箱请求
+    assert since == ticks[0]
+    assert request_ticks and since < request_ticks[0]
 
 
 @respx.mock
