@@ -6,8 +6,11 @@ import re
 
 from claude_register.console import log
 
-# 主正则用捕获组定位真正的码，避开邮件里的日期数字（接码文档 §8.4）
-DEFAULT_CODE_REGEX = r"code[^\d]*(\d{6})"
+# 主正则用捕获组定位真正的码，避开邮件里的日期数字（接码文档 §8.4）；
+# 同时要求 6 位数字前面不是 #，避开邮件 HTML 里跨行/跨标签出现在 "code" 后面的
+# CSS 颜色值（实测坑：#262624 是 Claude 品牌色，出现在魔术链接邮件和 Welcome 邮件里，
+# "code" 字样在它之前任意距离出现就会被旧的 [^\d]* 命中）
+DEFAULT_CODE_REGEX = r"code[^\d#]*(\d{6})"
 # 兜底正则：要求 6 位数字前面不是 #，避开邮件 HTML 里的 CSS 颜色值
 # （实测坑：#000000 / #737163 / #262624 都会被裸 \b\d{6}\b 命中）
 FALLBACK_CODE_REGEX = r"(?<![#0-9A-Fa-f])\b(\d{6})\b"

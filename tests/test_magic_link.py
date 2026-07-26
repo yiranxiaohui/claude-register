@@ -178,3 +178,21 @@ def test_poll_magic_link_backoff_on_5xx(client):
     )
     assert link == REAL_LINK
     assert clock.slept == [1.0]
+
+
+@respx.mock
+def test_poll_magic_link_sends_expected_params(client):
+    """to/since 必须原样发给服务端——丢了 since 会静默拿到本次运行之前的旧链接，
+    这正是 prepare_mailbox 和 test_mailbox.py 里那几个测试要守住的不变量。"""
+    route = respx.get(LATEST).mock(
+        return_value=httpx.Response(200, json={"emails": [_email(html_body=REAL_HTML)]})
+    )
+    client.poll_magic_link(
+        to="claude_aafdbe25@ckvlhj.xyz",
+        since="2026-07-26T00:00:00Z",
+        sleep=lambda s: None,
+        monotonic=FakeClock().monotonic,
+    )
+    params = route.calls[0].request.url.params
+    assert params["to"] == "claude_aafdbe25@ckvlhj.xyz"
+    assert params["since"] == "2026-07-26T00:00:00Z"

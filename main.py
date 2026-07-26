@@ -45,7 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=120.0,
         metavar="SECONDS",
-        help="等待登录链接/验证码超时秒数，默认 120；设 0 跳过等待（--code-timeout 为旧名别名）",
+        help=(
+            "等待登录链接/验证码的总预算秒数，默认 120；设 0 跳过等待"
+            "（--code-timeout 为旧名别名）。"
+            "验证码兜底轮询最多占这个预算的 25%%（且不超过 30s），"
+            "剩余预算留给登录链接轮询，总等待时间不会超过这里设的值。"
+        ),
     )
     return parser
 
