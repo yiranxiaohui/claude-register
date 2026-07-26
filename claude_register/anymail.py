@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +19,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+from claude_register.config import (
+    FALLBACK_CODE_REGEX,
+    resolve_code_regex,
+)
+from claude_register.console import log
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -52,6 +61,27 @@ class Mailbox:
     email: str
     expires_at: str | None = None
     tag: str | None = None
+
+
+# 致命错误：不会因为重试而变好（正则语法错 / key 失效 / scope 不足）
+FATAL_STATUSES = frozenset({400, 401, 403})
+
+
+def extract_code(email: dict[str, Any], regex: str) -> str | None:
+    """在 subject / text_body / html_body 里找验证码。
+
+    有捕获组返回第 1 组，否则返回整段匹配（与 AnyMail 服务端行为一致）。
+    """
+    try:
+        pattern = re.compile(regex, re.IGNORECASE)
+    except re.error:
+        return None
+    for field in ("subject", "text_body", "html_body"):
+        value = email.get(field) or ""
+        match = pattern.search(str(value))
+        if match:
+            return match.group(1) if match.groups() else match.group(0)
+    return None
 
 
 class AnyMailClient:
@@ -267,6 +297,93 @@ class AnyMailClient:
                     tag=account.get("tag"),
                 )
             raise RuntimeError(f"AnyMail 邮箱地址冲突，多次重试仍失败：{last_error}")
+
+    def _fetch_latest(
+        self,
+        *,
+        to: str,
+        since: str,
+        code_regex: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """单次 GET /api/emails/latest。致命状态码直接抛，其余交调用方退避。"""
+        params = {
+            "to": to,
+            "since": since,
+            "code_regex": code_regex,
+            "limit": max(1, min(int(limit), 50)),
+        }
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.get(
+                f"{self.base_url}/api/emails/latest",
+                headers=self._headers(),
+                params=params,
+            )
+            if resp.status_code in FATAL_STATUSES:
+                raise RuntimeError(
+                    f"AnyMail 接码失败 {resp.status_code}: {resp.text[:300]}\n"
+                    "请确认 API Key 含 emails:read scope，且 code_regex 语法正确。"
+                )
+            if resp.status_code >= 400:
+                # 5xx：交给调用方指数退避
+                raise httpx.HTTPStatusError(
+                    f"{resp.status_code}: {resp.text[:200]}",
+                    request=resp.request,
+                    response=resp,
+                )
+            data = resp.json() if resp.content else {}
+
+        emails = data.get("emails") if isinstance(data, dict) else None
+        return [e for e in emails if isinstance(e, dict)] if isinstance(emails, list) else []
+
+    def poll_code(
+        self,
+        *,
+        to: str,
+        since: str,
+        code_regex: str | None = None,
+        fallback_regex: str | None = None,
+        timeout: float = 120.0,
+        interval: float = 3.0,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> str | None:
+        """轮询直到取到验证码；超时返回 None（调用方走降级路径）。
+
+        两级匹配在单次响应内完成：先用服务端提取的 code，没有再用兜底正则
+        匹配同一批邮件的正文——避免每轮翻倍请求。
+        """
+        primary = code_regex or resolve_code_regex(os.getenv("ANYMAIL_CODE_REGEX"))
+        fallback = fallback_regex or FALLBACK_CODE_REGEX
+        deadline = monotonic() + timeout
+        backoff = 1.0
+
+        log(f"开始接码：{to}（超时 {timeout:.0f}s，每 {interval:.0f}s 一次）")
+        while monotonic() < deadline:
+            try:
+                emails = self._fetch_latest(
+                    to=to, since=since, code_regex=primary
+                )
+            except httpx.HTTPError as exc:
+                log(f"接码请求失败（{exc}），{backoff:.0f}s 后重试。")
+                sleep(backoff)
+                backoff = min(backoff * 2, 4.0)
+                continue
+            backoff = 1.0
+
+            for email in emails:
+                code = email.get("code")
+                if code:
+                    return str(code)
+            for email in emails:
+                code = extract_code(email, fallback)
+                if code:
+                    log("服务端未提取到码，已用兜底正则命中。")
+                    return code
+
+            sleep(interval)
+
+        return None
 
     def delete_mailbox(self, account_id: str) -> None:
         if not account_id:
