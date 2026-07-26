@@ -47,3 +47,12 @@ def test_resolve_code_regex_invalid_falls_back(capsys):
     """正则语法错时退回默认值并提示，不能让流程崩在这里。"""
     assert resolve_code_regex("(unclosed") == DEFAULT_CODE_REGEX
     assert "ANYMAIL_CODE_REGEX" in capsys.readouterr().out
+
+
+def test_fallback_regex_ignores_css_hex_colors():
+    """实测过的坑：邮件 HTML 里的 #000000 / #737163 会被裸 \\d{6} 当成验证码。"""
+    from claude_register.anymail import extract_code
+    from claude_register.config import FALLBACK_CODE_REGEX
+
+    html = '<td bgcolor="#000000" style="color: #737163;">Log in</td>'
+    assert extract_code({"html_body": html}, FALLBACK_CODE_REGEX) is None

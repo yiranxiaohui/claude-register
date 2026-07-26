@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import secrets
@@ -14,6 +15,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -22,6 +24,7 @@ import httpx
 
 from claude_register.config import (
     FALLBACK_CODE_REGEX,
+    MAGIC_LINK_REGEX,
     resolve_code_regex,
 )
 from claude_register.console import log
@@ -81,6 +84,35 @@ def extract_code(email: dict[str, Any], regex: str) -> str | None:
         match = pattern.search(str(value))
         if match:
             return match.group(1) if match.groups() else match.group(0)
+    return None
+
+
+def magic_link_recipient(link: str) -> str | None:
+    """从魔术链接尾部的 base64 解出收件邮箱；解不出返回 None。"""
+    frag = link.partition("#")[2]
+    b64 = frag.partition(":")[2]
+    if not b64:
+        return None
+    try:
+        pad = "=" * (-len(b64) % 4)
+        email = base64.b64decode(b64 + pad).decode("utf-8", "replace")
+    except Exception:
+        return None
+    return email.strip().lower() if "@" in email else None
+
+
+def extract_magic_link(email: dict[str, Any]) -> str | None:
+    """从邮件里提取 Claude 魔术登录链接。
+
+    实测：链接只在 html_body 里（text_body 为空），且是 HTML 转义过的，
+    所以必须先 unescape 再匹配。
+    """
+    pattern = re.compile(MAGIC_LINK_REGEX)
+    for field in ("text_body", "html_body", "subject"):
+        raw = email.get(field) or ""
+        match = pattern.search(unescape(str(raw)))
+        if match:
+            return match.group(0).rstrip("&")
     return None
 
 
@@ -389,6 +421,49 @@ class AnyMailClient:
                 if code:
                     log("服务端未提取到码，已用兜底正则命中。")
                     return code
+
+            sleep(interval)
+
+        return None
+
+    def poll_magic_link(
+        self,
+        *,
+        to: str,
+        since: str,
+        timeout: float = 120.0,
+        interval: float = 3.0,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> str | None:
+        """轮询直到拿到魔术登录链接；超时返回 None。
+
+        只接受 base64 尾巴解出来等于 to 的链接——避免抓错别的邮箱的邮件。
+        """
+        target = to.strip().lower()
+        deadline = monotonic() + timeout
+        backoff = 1.0
+
+        log(f"开始等待登录链接：{to}（超时 {timeout:.0f}s，每 {interval:.0f}s 一次）")
+        while monotonic() < deadline:
+            try:
+                emails = self._fetch_latest(to=to, since=since, code_regex="")
+            except httpx.HTTPError as exc:
+                log(f"查询邮件失败（{exc}），{backoff:.0f}s 后重试。")
+                sleep(backoff)
+                backoff = min(backoff * 2, 4.0)
+                continue
+            backoff = 1.0
+
+            for email in emails:
+                link = extract_magic_link(email)
+                if not link:
+                    continue
+                who = magic_link_recipient(link)
+                if who and who != target:
+                    log(f"跳过收件人不匹配的链接（{who}）。")
+                    continue
+                return link
 
             sleep(interval)
 

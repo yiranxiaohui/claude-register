@@ -8,8 +8,12 @@ from claude_register.console import log
 
 # 主正则用捕获组定位真正的码，避开邮件里的日期数字（接码文档 §8.4）
 DEFAULT_CODE_REGEX = r"code[^\d]*(\d{6})"
-# 兜底正则：主正则没命中时在客户端匹配返回的邮件正文
-FALLBACK_CODE_REGEX = r"\b(\d{6})\b"
+# 兜底正则：要求 6 位数字前面不是 #，避开邮件 HTML 里的 CSS 颜色值
+# （实测坑：#000000 / #737163 / #262624 都会被裸 \b\d{6}\b 命中）
+FALLBACK_CODE_REGEX = r"(?<![#0-9A-Fa-f])\b(\d{6})\b"
+
+# 魔术链接：https://claude.ai/magic-link#<32位hex>:<base64(邮箱)>
+MAGIC_LINK_REGEX = r"https://claude\.ai/magic-link#[A-Za-z0-9+/=:._-]+"
 
 DEFAULT_EXPIRES_HOURS = 24.0
 

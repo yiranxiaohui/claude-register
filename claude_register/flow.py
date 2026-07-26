@@ -12,6 +12,7 @@ from claude_register.browser import (
     launch_browser,
     new_page,
     open_login,
+    open_magic_link,
     pause_for_user,
     screenshot,
     wait_code_screen,
@@ -33,7 +34,7 @@ def run_browser(
     mailbox: Mailbox,
     since: str,
     *,
-    auto_code: bool,
+    auto_login: bool,
     code_timeout: float,
 ) -> None:
     with sync_playwright() as p:
@@ -47,27 +48,38 @@ def run_browser(
             screen_ok = wait_code_screen(page)
             if not screen_ok:
                 screenshot(page, "code_screen_missing.png")
-                log("验证码界面未出现，但仍继续接码——码本身有价值。")
+                log("验证码界面未出现，但仍继续等待——魔术链接/验证码本身有价值。")
 
+            link: str | None = None
             code: str | None = None
             if code_timeout > 0:
-                code = client.poll_code(
-                    to=mailbox.email,
-                    since=since,
-                    timeout=code_timeout,
+                link = client.poll_magic_link(
+                    to=mailbox.email, since=since, timeout=code_timeout
                 )
+                if link is None:
+                    # 退一步试试 6 位码——Claude 的 UI 里存在这条路径
+                    log("未收到登录链接，改试 6 位验证码。")
+                    code = client.poll_code(
+                        to=mailbox.email, since=since, timeout=30.0
+                    )
             else:
-                log("--code-timeout 0，跳过接码。")
+                log("--login-timeout 0，跳过等待邮件。")
 
-            if code is None:
-                if code_timeout > 0:
-                    log("接码超时，未收到验证码。")
-                    screenshot(page, "code_timeout.png")
-                    _report_manual_fallback(mailbox, client)
-            else:
+            if link:
+                banner("已收到登录链接")
+                log(link)
+                if not auto_login:
+                    log("--no-auto-login，请自己打开上面的链接。")
+                elif open_magic_link(page, link):
+                    page.wait_for_timeout(3_000)
+                    screenshot(page, "after_magic_link.png")
+                    log(f"当前地址：{page.url}")
+                else:
+                    log("打开链接失败，请手动复制上面的链接到浏览器。")
+            elif code:
                 banner(f"验证码：{code}")
-                if not auto_code:
-                    log("--no-auto-code，请手动填入上面的验证码。")
+                if not auto_login:
+                    log("--no-auto-login，请手动填入上面的验证码。")
                 elif not screen_ok:
                     log("验证码界面未确认出现，请手动填入上面的验证码。")
                 elif not fill_code(page, code):
@@ -82,6 +94,10 @@ def run_browser(
                         log("提交验证码后弹出了 hCaptcha 拖拽题（Task 6 已知现象）。")
                         log("请在浏览器里手动完成拖拽，脚本不会自动绕过。")
                     log(f"当前地址：{page.url}")
+            else:
+                log("既没收到登录链接，也没收到验证码。")
+                screenshot(page, "no_mail.png")
+                _report_manual_fallback(mailbox, client)
 
             pause_for_user()
         finally:
@@ -93,7 +109,7 @@ def run(
     *,
     email: str | None = None,
     domain: str | None = None,
-    auto_code: bool = True,
+    auto_login: bool = True,
     code_timeout: float = 120.0,
 ) -> None:
     load_dotenv()
@@ -108,7 +124,7 @@ def run(
         client,
         mailbox,
         since,
-        auto_code=auto_code,
+        auto_login=auto_login,
         code_timeout=code_timeout,
     )
 

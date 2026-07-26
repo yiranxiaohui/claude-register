@@ -52,6 +52,17 @@ def open_login(page: Page) -> None:
     log(f"当前地址：{page.url}")
 
 
+def open_magic_link(page: Page, link: str) -> bool:
+    """打开魔术登录链接完成登录。返回 False 表示打开失败。"""
+    try:
+        page.goto(link, wait_until="domcontentloaded", timeout=60_000)
+        log("已打开登录链接。")
+    except Exception as exc:
+        log(f"打开登录链接失败（{exc}）。")
+        return False
+    return True
+
+
 def wait_login_form(page: Page, timeout_ms: int = 120_000) -> None:
     """等邮箱输入框出现；Cloudflare 验证期间轮询并打印状态。"""
     email_box = page.get_by_placeholder("Enter your email")

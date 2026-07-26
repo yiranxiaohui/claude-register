@@ -1,11 +1,13 @@
-"""项目入口：选后缀、建邮箱、自动接码并填入 Claude 登录页。
+"""项目入口：选后缀、建邮箱、自动打开登录链接（或接码）登录 Claude。
 
 运行：
-  uv run main.py                       选后缀 → 建邮箱 → 自动接码登录
+  uv run main.py                       选后缀 → 建邮箱 → 自动登录
   uv run main.py -d example.com        直接指定后缀
   uv run main.py -e you@example.com    复用指定邮箱
-  uv run main.py --no-auto-code        只打印验证码，不自动填
-  uv run main.py --code-timeout 180    接码超时秒数（0=跳过接码）
+  uv run main.py --no-auto-login       只打印登录链接/验证码，不自动填
+  uv run main.py --login-timeout 180   等待邮件超时秒数（0=跳过等待）
+
+  旧参数名 --no-auto-code / --code-timeout 仍可用（别名，向后兼容）。
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from claude_register.flow import run
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="选后缀、建 AnyMail 邮箱并自动接码填入 Claude 登录页",
+        description="选后缀、建 AnyMail 邮箱并自动打开登录链接（或接码）登录 Claude",
     )
     parser.add_argument(
         "--email",
@@ -30,16 +32,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="新建邮箱用的后缀域名（也可设 ANYMAIL_DOMAIN）",
     )
     parser.add_argument(
+        "--no-auto-login",
         "--no-auto-code",
+        dest="no_auto_login",
         action="store_true",
-        help="接到验证码只打印，不自动填入",
+        help="收到登录链接/验证码只打印，不自动填入（--no-auto-code 为旧名别名）",
     )
     parser.add_argument(
+        "--login-timeout",
         "--code-timeout",
+        dest="login_timeout",
         type=float,
         default=120.0,
         metavar="SECONDS",
-        help="接码超时秒数，默认 120；设 0 跳过接码",
+        help="等待登录链接/验证码超时秒数，默认 120；设 0 跳过等待（--code-timeout 为旧名别名）",
     )
     return parser
 
@@ -49,10 +55,11 @@ def main(argv: list[str] | None = None) -> None:
     run(
         email=args.email,
         domain=args.domain,
-        auto_code=not args.no_auto_code,
-        code_timeout=args.code_timeout,
+        auto_login=not args.no_auto_login,
+        code_timeout=args.login_timeout,
     )
 
 
 if __name__ == "__main__":
     main()
+
