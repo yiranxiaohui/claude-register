@@ -1419,27 +1419,37 @@ git commit -m "docs: 记录 claude.ai 验证码界面 DOM 结构"
 
 - [ ] **Step 1: 读 Task 6 的笔记**
 
-打开 `docs/superpowers/notes/2026-07-26-code-screen-dom.md`，确认第 1、2、3、4 问的答案。**下面的实现是骨架，选择器必须按笔记里实测的结果填。**
+打开 `docs/superpowers/notes/2026-07-26-code-screen-dom.md`。下面的实现已按笔记的实测结论重写，**选择器都是实测确认过的，不要再改回猜测的定位链**。
 
-- [ ] **Step 2: 实现两个函数**
+Task 6 推翻了本计划原先的三个假设：
 
-加到 `browser.py` 末尾。按笔记调整 `_code_input` 里的定位链：
+1. **`fill_email` 之后不是验证码界面，而是一个 0 个 input 的中间态**（"To continue, click the link sent to…"，只有三个按钮）。必须先点 `data-testid="enter-code"`，验证码输入框才会出现。原先的 `_code_input` 定位链会在这个 0-input 页面上一直超时。
+2. **是单个输入框，不是 6 个 OTP 格子。** 所以原计划的 `_fill_otp_boxes` 是死代码，删掉。
+3. **不会满位自动提交**（用请求监听实测过），必须显式点 `data-testid="continue"`。而且提交按钮的 `disabled` 恒为 `False`，不能用它判断输入是否填满。
+
+还有一个 Task 6 发现的、原计划完全没预料到的环节：**点提交后可能弹 hCaptcha 拖拽验证**。用假码实测会弹，真码是否必然弹未知。**已决定的处理方式：填码和提交照做，检测到 hCaptcha 就打印提示、截图、保留浏览器让人工拖拽，不尝试自动绕过。**
+
+- [ ] **Step 2: 实现四个函数**
+
+加到 `browser.py` 末尾。所有选择器都来自 Task 6 实测：
 
 ```python
 def _code_input(page: Page):
-    """按 Task 6 笔记的优先级定位验证码输入。
+    """定位验证码输入框。Task 6 实测：单个 input，data-testid="code" 最稳。
 
-    定位链按稳定性排序，逐个试；全都不中返回 None。
-    注意：若笔记结论是「6 个分开的 OTP 格子」，改用下面 _fill_otp_boxes 分支。
+    找不到返回 None（调用方降级，不抛异常）。
     """
-    candidates = [
+    try:
+        box = page.get_by_test_id("code")
+        if box.count() >= 1 and box.first.is_visible():
+            return box.first
+    except Exception:
+        pass
+    # 兜底：data-testid 若改版，用同一元素的另外两个稳定属性
+    for build in (
         lambda: page.locator("input[autocomplete='one-time-code']"),
-        lambda: page.get_by_label("Verification code"),
-        lambda: page.get_by_placeholder("Enter code"),
-        lambda: page.locator("input[name='code']"),
-        lambda: page.locator("input[inputmode='numeric']"),
-    ]
-    for build in candidates:
+        lambda: page.get_by_label("Login code"),
+    ):
         try:
             loc = build()
             if loc.count() >= 1 and loc.first.is_visible():
@@ -1449,26 +1459,37 @@ def _code_input(page: Page):
     return None
 
 
-def _fill_otp_boxes(page: Page, code: str) -> bool:
-    """多格 OTP：逐格填。仅当 Task 6 笔记确认是这种结构时才走这里。"""
-    boxes = page.locator("input[inputmode='numeric'], input[maxlength='1']")
+def _reveal_code_input(page: Page) -> bool:
+    """点掉中间态的「Enter verification code」按钮，把验证码输入框展开出来。
+
+    Task 6 实测：fill_email 之后先落在一个 0 个 input 的提示界面，
+    必须点这个按钮才会出现输入框。已经在验证码界面时直接返回 True。
+    """
+    if _code_input(page) is not None:
+        return True
     try:
-        count = boxes.count()
-    except Exception:
-        return False
-    if count < len(code):
-        return False
-    for i, ch in enumerate(code):
-        boxes.nth(i).fill(ch)
-    log(f"已逐格填入验证码（{count} 格）。")
-    return True
+        btn = page.get_by_test_id("enter-code")
+        if btn.count() >= 1 and btn.first.is_visible():
+            btn.first.click()
+            log("已点击 Enter verification code")
+            return True
+    except Exception as exc:
+        log(f"点击 Enter verification code 失败（{exc}）。")
+    return False
 
 
 def wait_code_screen(page: Page, timeout_ms: int = 60_000) -> bool:
-    """等验证码界面出现。返回 False 表示没等到（调用方降级，不抛异常）。"""
+    """等验证码输入框出现，中途自动点掉中间态按钮。
+
+    返回 False 表示没等到（调用方降级，不抛异常）。
+    """
     step = 2_000
     waited = 0
     while waited < timeout_ms:
+        if _code_input(page) is not None:
+            log("验证码界面已出现。")
+            return True
+        _reveal_code_input(page)
         if _code_input(page) is not None:
             log("验证码界面已出现。")
             return True
@@ -1479,12 +1500,30 @@ def wait_code_screen(page: Page, timeout_ms: int = 60_000) -> bool:
     return False
 
 
+def hcaptcha_visible(page: Page) -> bool:
+    """检测提交后是否弹了 hCaptcha 拖拽验证。
+
+    Task 6 实测：点提交会触发 api.hcaptcha.com/getcaptcha，并弹出拖拽题。
+    这里只负责如实告知调用方，不尝试自动绕过。
+    """
+    for sel in (
+        "iframe[src*='hcaptcha.com']",
+        "iframe[title*='hCaptcha']",
+        "iframe[src*='/fc/gt2/']",
+    ):
+        try:
+            loc = page.locator(sel)
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def fill_code(page: Page, code: str) -> bool:
-    """填验证码并提交。返回 False 表示定位不到（调用方打印验证码让人手填）。"""
+    """填验证码并提交。返回 False 表示填不进去（调用方打印验证码让人手填）。"""
     box = _code_input(page)
     if box is None:
-        if _fill_otp_boxes(page, code):
-            return _submit_code(page)
         log("找不到验证码输入框。")
         return False
 
@@ -1501,31 +1540,33 @@ def fill_code(page: Page, code: str) -> bool:
 
 
 def _submit_code(page: Page) -> bool:
-    """点提交按钮。有些 OTP 满位自动提交，找不到按钮不算失败。"""
-    for name in ("Continue", "Verify", "Submit", "Log in"):
-        try:
-            btn = page.get_by_role("button", name=name)
-            if btn.count() >= 1 and btn.first.is_enabled():
-                btn.first.click()
-                log(f"已点击 {name}")
-                return True
-        except Exception:
-            continue
-    log("未找到提交按钮（可能满位自动提交）。")
-    return True
+    """点提交按钮。Task 6 实测：data-testid="continue"，不会自动提交。
+
+    注意：提交按钮的 disabled 恒为 False，不能用它判断输入是否填满。
+    """
+    try:
+        btn = page.get_by_test_id("continue")
+        if btn.count() >= 1 and btn.first.is_visible():
+            btn.first.click()
+            log("已点击提交（Verify Email Address）")
+            return True
+    except Exception as exc:
+        log(f"点击提交按钮失败（{exc}）。")
+        return False
+    log("未找到提交按钮。")
+    return False
 ```
 
 - [ ] **Step 3: 实跑验证**
 
-先手动跑到验证码界面，确认 `wait_code_screen` 返回 `True`：
+Task 6 的探针已经确认过这些选择器能定位到元素（`output/code_screen_real.html` 里 `data-testid="code"` / `"continue"` 各出现 1 次，中间态里 `"enter-code"` 出现 1 次）。这一步只需确认新函数导入无误、语法正确：
 
 ```bash
-uv run scripts/probe_code_screen.py
+uv run python -c "from claude_register.browser import wait_code_screen, fill_code, hcaptcha_visible; print('ok')"
+uv run pytest tests/ -q
 ```
 
-在探针停住时，另开终端确认能从 AnyMail 后台看到验证码邮件。
-
-**Task 8 会做完整端到端验证。** 这一步只需确认选择器能定位到元素，不报异常。
+**完整端到端验证在 Task 8 做**——那里才有真实验证码可填。
 
 - [ ] **Step 4: 提交**
 
@@ -1564,6 +1605,7 @@ from claude_register.anymail import AnyMailClient, Mailbox, load_dotenv
 from claude_register.browser import (
     fill_code,
     fill_email,
+    hcaptcha_visible,
     launch_browser,
     new_page,
     open_login,
@@ -1631,6 +1673,11 @@ def run_browser(
                 else:
                     page.wait_for_timeout(3_000)
                     screenshot(page, "after_code.png")
+                    if hcaptcha_visible(page):
+                        screenshot(page, "hcaptcha.png")
+                        banner("需要人工拖拽 hCaptcha 验证")
+                        log("提交验证码后弹出了 hCaptcha 拖拽题（Task 6 已知现象）。")
+                        log("请在浏览器里手动完成拖拽，脚本不会自动绕过。")
                     log(f"当前地址：{page.url}")
 
             pause_for_user()
@@ -1758,11 +1805,16 @@ uv run main.py
 
 1. 提示选后缀（或直接用 `ANYMAIL_DOMAIN`）
 2. 打印「已创建邮箱：claude_xxxxxxxx@<后缀>」
-3. 打开 claude.ai，填入邮箱，点 Continue
-4. 打印「验证码界面已出现」
+3. 打开 claude.ai，填入邮箱，点 Continue（Cloudflare 可能等 30-120 秒）
+4. 打印「已点击 Enter verification code」→「验证码界面已出现」
 5. 打印「开始接码：…」并轮询
 6. 横幅打印「验证码：xxxxxx」
-7. 自动填入并提交，登录成功
+7. 自动填入并点击提交（Verify Email Address）
+8. 若弹 hCaptcha 拖拽题：横幅提示需人工拖拽，浏览器保持打开
+
+**验收标准：第 6 步必须拿到真实验证码，第 7 步必须成功填入并提交。**
+
+第 8 步的 hCaptcha 是 Task 6 发现的已知现象，用假码实测会弹、真码是否必然弹未知——**这一步需要人工完成属于预期行为，不算失败**。跑完请如实记录：真码提交后到底弹没弹 hCaptcha，这是本计划唯一还没答案的问题。
 
 **若第 7 步失败但第 6 步拿到了码 —— 降级路径生效，属于可接受结果**，把实际情况记下来。
 

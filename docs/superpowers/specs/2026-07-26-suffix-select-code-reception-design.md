@@ -200,6 +200,8 @@ uv run main.py --code-timeout 180       接码超时秒数，默认 120
 
 ## 已知风险
 
-1. **验证码输入框结构未知** —— 最大风险。缓解：实跑看 DOM 再写；降级打印保底。
-2. **claude.ai 可能改版** —— 选择器失效。缓解：现有 Cloudflare 轮询模式已经比较宽容；失败都留截图。
-3. **24 小时过期** —— 用户已知情选择，见上文。
+1. ~~**验证码输入框结构未知**~~ —— **已由 Task 6 实测解决**（2026-07-26）。结论：单个 `input`，`data-testid="code"`；且 `fill_email` 之后先落在一个 **0 个 input 的中间态**，必须先点 `data-testid="enter-code"` 才会出现输入框。详见 `docs/superpowers/notes/2026-07-26-code-screen-dom.md`。
+2. **提交验证码可能弹 hCaptcha 拖拽验证** —— Task 6 新发现，本设计原先完全没预料到。用假码实测必弹（`api.hcaptcha.com/getcaptcha`），真码是否必然弹**尚未验证**。已决定的处理方式：**不尝试自动绕过**，检测到就打印横幅提示 + 截图 + 保留浏览器，由人工拖拽完成。这意味着"全自动登录"在最后一步可能仍需人工介入一次。
+3. **claude.ai 可能改版** —— 选择器失效。缓解：`data-testid` 比文案稳；另留 `autocomplete="one-time-code"` 和 `aria-label="Login code"` 两条兜底定位；失败都留截图。
+4. **Cloudflare 等待时长波动大** —— Task 6 实测 33 秒到 120 秒以上，有一次直接撞上 `wait_login_form` 自身的 120 秒超时。缓解：现有轮询会打印进度；超时留截图。
+5. **24 小时过期** —— 用户已知情选择，见上文。
