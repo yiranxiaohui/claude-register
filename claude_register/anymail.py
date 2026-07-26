@@ -460,7 +460,12 @@ class AnyMailClient:
                 if not link:
                     continue
                 who = magic_link_recipient(link)
-                if who and who != target:
+                if who is None:
+                    # AnyMail 的 to 是 LIKE 匹配，不是精确匹配，收件人校验解不出来时
+                    # 不能当成"没问题"放行——宁可继续等，也不能拿错邮箱的链接去登录。
+                    log("跳过收件人无法解析的链接（base64 尾巴解不出邮箱）。")
+                    continue
+                if who != target:
                     log(f"跳过收件人不匹配的链接（{who}）。")
                     continue
                 return link

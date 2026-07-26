@@ -34,9 +34,16 @@ def test_extract_from_real_html_body():
 
 
 def test_extract_handles_html_escaped_amp():
-    """真实邮件里 & 会被转义成 &amp;，提取前必须 unescape。"""
-    escaped = REAL_HTML.replace("magic-link#", "magic-link#") + "&amp;utm=1"
-    assert extract_magic_link(_email(html_body=escaped)) == REAL_LINK
+    """真实邮件里链接内部的字符可能被转义成数字实体（如 = 变成 &#61;），
+    提取前必须 unescape，否则匹配会在实体处截断，取到的链接是不完整/错误的。"""
+    # 把 REAL_LINK 结尾的 base64 padding "=" 换成它的数字实体 "&#61;"——
+    # 转义发生在被正则匹配的 token 内部，而不是 token 之外，
+    # 这样如果 extract_magic_link 漏调 unescape()，匹配会在 "&" 处截断，
+    # 取到缺了结尾 "=" 的链接，断言就会失败。
+    escaped_link = REAL_LINK[:-1] + "&#61;"
+    assert escaped_link != REAL_LINK  # 确认确实做了转义替换
+    html = f'<a href="{escaped_link}">Log in to Claude.ai</a>'
+    assert extract_magic_link(_email(html_body=html)) == REAL_LINK
 
 
 def test_extract_searches_text_body_too():
@@ -131,6 +138,27 @@ def test_poll_magic_link_skips_wrong_recipient(client):
         monotonic=clock.monotonic,
     )
     assert link == REAL_LINK
+
+
+@respx.mock
+def test_poll_magic_link_skips_undecodable_recipient(client):
+    """base64 尾巴解不出收件邮箱时必须当成没通过校验而跳过（fail closed），
+    不能因为解不出来就当成"没问题"直接放行——否则可能登录到错的邮箱。"""
+    undecodable = _email(
+        html_body='<a href="https://claude.ai/magic-link#deadbeefdeadbeefdeadbeefdeadbeef">x</a>'
+    )
+    respx.get(LATEST).mock(return_value=httpx.Response(200, json={"emails": [undecodable]}))
+    clock = FakeClock()
+    link = client.poll_magic_link(
+        to="claude_aafdbe25@ckvlhj.xyz",
+        since="2026-07-26T00:00:00Z",
+        timeout=10.0,
+        interval=3.0,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert link is None
+    assert clock.now >= 10.0
 
 
 @respx.mock
