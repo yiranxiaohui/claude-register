@@ -331,7 +331,16 @@ class AnyMailClient:
                     request=resp.request,
                     response=resp,
                 )
-            data = resp.json() if resp.content else {}
+            try:
+                data = resp.json() if resp.content else {}
+            except ValueError as exc:
+                # 200 但响应体不是合法 JSON（比如网关返回的 HTML 错误页）：
+                # 交给调用方按退避重试，不当作致命错误、更不能让异常逃出轮询循环。
+                raise httpx.HTTPStatusError(
+                    f"响应体不是合法 JSON: {exc}",
+                    request=resp.request,
+                    response=resp,
+                ) from exc
 
         emails = data.get("emails") if isinstance(data, dict) else None
         return [e for e in emails if isinstance(e, dict)] if isinstance(emails, list) else []

@@ -213,6 +213,50 @@ def test_poll_code_backoff_on_network_error(client):
 
 
 @respx.mock
+def test_poll_code_backoff_resets_after_success(client):
+    """失败 → 成功（空结果）→ 失败：退避计数应在成功后归零，而不是继续翻倍。"""
+    respx.get(LATEST).mock(
+        side_effect=[
+            httpx.Response(503, text="upstream down"),
+            httpx.Response(200, json={"emails": []}),
+            httpx.Response(503, text="upstream down"),
+            httpx.Response(200, json={"emails": [_email(code="556677")]}),
+        ]
+    )
+    clock = FakeClock()
+    code = client.poll_code(
+        to="a@mail.test",
+        since="2026-07-26T00:00:00Z",
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert code == "556677"
+    # 3.0 是成功空轮之后的正常轮询间隔；末尾的 1.0 证明退避已归零，而非继续翻倍到 2.0
+    assert clock.slept == [1.0, 3.0, 1.0]
+
+
+@respx.mock
+def test_poll_code_backoff_on_malformed_json_body(client):
+    """200 但响应体不是合法 JSON（比如网关错误页）：应按退避重试，
+    不能当作致命错误、更不能让异常逃出轮询循环。"""
+    respx.get(LATEST).mock(
+        side_effect=[
+            httpx.Response(200, text="<html>Bad Gateway</html>"),
+            httpx.Response(200, json={"emails": [_email(code="334455")]}),
+        ]
+    )
+    clock = FakeClock()
+    code = client.poll_code(
+        to="a@mail.test",
+        since="2026-07-26T00:00:00Z",
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert code == "334455"
+    assert clock.slept == [1.0]
+
+
+@respx.mock
 def test_poll_code_backoff_caps_at_4s(client):
     respx.get(LATEST).mock(return_value=httpx.Response(503, text="down"))
     clock = FakeClock()
