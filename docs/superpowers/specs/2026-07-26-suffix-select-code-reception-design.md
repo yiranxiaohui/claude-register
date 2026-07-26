@@ -85,9 +85,11 @@ def poll_code(
 - 网络报错指数退避 1s → 2s → 4s，不因一次抖动整体失败
 - 超时返回 `None` 而不是抛异常——调用方要走降级路径
 
-### 接码正则
+### 接码正则与两级匹配
 
-默认 `code[^\d]*(\d{6})`，取不到再退回 `\b(\d{6})\b`。文档 §8.4 建议用捕获组而非裸 `\d{6}`，避开邮件里的日期数字。可用 `ANYMAIL_CODE_REGEX` 覆盖。
+主正则默认 `code[^\d]*(\d{6})`，兜底正则 `\b(\d{6})\b`。文档 §8.4 建议用捕获组而非裸 `\d{6}`，避开邮件里的日期数字。可用 `ANYMAIL_CODE_REGEX` 覆盖主正则。
+
+**两级匹配在单次请求内完成，不发两次请求**：每轮轮询带主正则请求一次；若返回了邮件但 `code` 为 `null`，就在客户端拿兜底正则去匹配返回的 `subject` / `text_body` / `html_body`。这样避免每轮翻倍的请求量，也避免「主正则没中就白等一整轮」。
 
 ### `mailbox.py`
 
@@ -126,6 +128,21 @@ uv run main.py --code-timeout 180       接码超时秒数，默认 120
 
 删除 `--new`（默认就是新建，flag 无意义）。
 
+### 参数交互规则
+
+明确下来避免实现时二选：
+
+- `-e` 与 `-d` 同时给 → `-e` 优先，忽略 `-d` 并打印一行提示（邮箱已含后缀，`-d` 无从生效）
+- `-e` 指定的邮箱 → 走现有 `get_or_create_mailbox`：存在则复用，不存在则创建。`since` 同样在这之前记录
+- `--no-auto-code` → 仍然轮询接码并打印验证码，只是不调 `fill_code`。浏览器保持打开
+- `--code-timeout 0` → 完全跳过接码，只建邮箱 + 填邮箱（等于旧行为）
+
+### `ANYMAIL_EXPIRES_HOURS` 取值
+
+- 未设置或留空 → 用默认 24 小时
+- 正数 → 该小时数
+- `0` 或负数 → 永久（不传 `expires_at`）
+
 `.env` 新增，均可选：
 
 ```
@@ -150,20 +167,24 @@ uv run main.py --code-timeout 180       接码超时秒数，默认 120
 | Cloudflare 卡住 | 保留现有 `wait_login_form` 轮询，超时截图 `waiting_login.png` |
 | 接码超时 | 截图 + 打印邮箱地址和 AnyMail 后台链接，浏览器保持打开，不删邮箱 |
 | 填码框定位不到 | 大字打印验证码 + 截图，浏览器保持打开手填 |
+| 验证码界面没出现 | `wait_code_screen` 返回 `False`：截图，仍然继续轮询接码并打印验证码（码本身有价值），浏览器保持打开 |
 | 轮询网络抖动 | 指数退避 1s→2s→4s，不中断流程 |
 | API Key scope 不足（403） | 打印 AnyMail 返回的 error 原文 + 需要的 scope 清单 |
 
 浏览器默认保持打开（`CLAUDE_REGISTER_NO_PAUSE=1` 可跳过暂停），失败时尤其不关。
 
+**邮箱一律不自动删除。** 接码文档 §5.3 提到可以 `DELETE /api/accounts/:id` 回收，但这里注册出来的账号要长期用，删邮箱等于丢掉后续所有来信。清理交给 24 小时 `expires_at` 的 cron，或按 `tag=claude-register` 手动批量清理（文档 §5.4）。
+
 ## 测试策略
 
 ### 自动测试（`tests/`，`respx` mock httpx）
 
-- `poll_code`：首轮命中 / 第三轮命中 / 一直空到超时返回 `None` / 捕获组取第 1 组 / 网络报错退避后恢复
+- `poll_code`：首轮命中 / 第三轮命中 / 一直空到超时返回 `None` / 捕获组取第 1 组 / 网络报错退避后恢复 / 主正则未命中时客户端兜底正则接手
 - **`since` 时序**：断言请求里的 `since` 早于建邮箱的时刻（钉住文档 §8.2 那个坑）
 - `choose_suffix`：`--domain` 优先 / 回落 `ANYMAIL_DOMAIN` / 回落 `/api/domains` / 单域名不提示 / 无域名报错
-- `create_for_suffix`：409 重试换前缀 / `expires_at` 按 24 小时算对
+- `create_for_suffix`：409 重试换前缀 / `expires_at` 按 24 小时算对 / `ANYMAIL_EXPIRES_HOURS=0` 时不传 `expires_at`
 - 默认正则：能从 `Your login code is 123456` 取出 `123456`，不误取日期里的 6 位数
+- 参数交互：`-e` 与 `-d` 同时给时 `-e` 胜出 / `--code-timeout 0` 跳过接码
 
 ### 必须实跑验证
 
