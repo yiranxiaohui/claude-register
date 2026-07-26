@@ -8,6 +8,15 @@
 
 ## 环境搭建
 
+**克隆本仓库后运行**（大多数人的情况）：
+
+```
+uv sync
+uv run playwright install chromium
+```
+
+**从零新建同类项目**（本项目最初就是这么搭起来的）：
+
 ```
 uv init --python 3.13 --no-workspace
 uv add playwright
@@ -47,6 +56,11 @@ saucedemo 是国外站点。确认网络能通：
 
 **想重新走一遍 03 的登录流程**
 删掉 `.auth/state.json` 再运行。
+
+**跑 03 报错 `Timeout ... exceeded` / `expect(page).to_have_url` 超时**
+大概率是保存的登录状态过期了。saucedemo 的会话 cookie 很短命（约 10 分钟），
+带着过期 cookie 访问会被踢回登录页，导致等待 `inventory.html` 的断言超时。
+删掉 `.auth/state.json` 再跑一次就好。
 
 **Git Bash 里跑脚本，中文 print 输出变成乱码**
 这是终端默认代码页的显示问题，脚本本身跑得好好的，不影响功能。
