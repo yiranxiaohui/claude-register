@@ -135,7 +135,7 @@ def run_browser(
             pause_for_user()
         finally:
             context.close()
-            browser.close()
+            # browser 的关闭交给 browser_session 的上下文退出，这里不重复关。
 
 
 def run(
