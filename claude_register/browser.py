@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
+from camoufox.sync_api import Camoufox
 from playwright.sync_api import Page, expect
 
 from claude_register.console import log, prompt
@@ -21,24 +23,34 @@ def screenshot(page: Page, name: str) -> Path:
     return path
 
 
-def launch_browser(p):
-    common = {
-        "headless": False,
-        "args": ["--disable-blink-features=AutomationControlled"],
-    }
+@contextmanager
+def browser_session():
+    """启动 Camoufox（Firefox 系隐身浏览器）会话。
+
+    headless="virtual" 自动包 Xvfb，适配无显示的容器，且比真 headless 更抗
+    Cloudflare 检测；humanize 提供人性化光标移动；locale/geoip 让指纹统一。
+    """
     try:
-        browser = p.chromium.launch(channel="chrome", **common)
-        log("已启动本机 Chrome（channel=chrome）")
-        return browser
+        cm = Camoufox(
+            headless="virtual",
+            humanize=True,
+            locale="en-US",
+            geoip=True,
+            window=(1280, 900),
+        )
     except Exception as exc:
-        log(f"本机 Chrome 不可用（{exc}），回退到 Playwright Chromium")
-        return p.chromium.launch(**common)
+        raise RuntimeError(
+            f"启动 Camoufox 失败（{exc}）。请先运行 `uv run camoufox fetch` "
+            "下载浏览器二进制，并确认已安装 Xvfb。"
+        ) from exc
+    with cm as browser:
+        log("已启动 Camoufox（headless=virtual）")
+        yield browser
 
 
 def new_page(browser):
     context = browser.new_context(
-        locale="en-US",
-        viewport={"width": 1280, "height": 900},
+        no_viewport=True,
     )
     page = context.new_page()
     page.set_default_timeout(30_000)
