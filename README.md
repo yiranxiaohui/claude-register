@@ -9,7 +9,7 @@
 
 ```text
 uv sync
-uv run playwright install chromium
+uv run camoufox fetch
 ```
 
 AnyMail API Key 需要的 scope：`emails:read` + `accounts:write`（若没固定 `ANYMAIL_DOMAIN`，再加 `domains:read`），并限定账号类型为 `Domain`。
@@ -60,6 +60,15 @@ uv run main.py --login-timeout 0
 程序仍保留了 6 位验证码这条路（`poll_code` / `fill_code`）：Claude 的登录界面上确实存在验证码输入框（点 "Enter verification code" 后出现），只是这些临时邮箱收到的是链接邮件。等链接超时后会再试验证码作为兜底，兜底时长是 `--login-timeout` 总预算的 25%（最多 30 秒），不会让总等待时间超过你设的值。
 
 ## 已知的坑
+
+**浏览器引擎是 Camoufox（Firefox 系隐身浏览器），不是 Chromium。** 它以
+`headless="virtual"` 模式运行——自动包一层 Xvfb 虚拟显示，既适配无图形界面的
+服务器/容器，也比真 headless 更能扛住 Cloudflare 挑战。运行前需装好 Xvfb，并跑过
+一次 `uv run camoufox fetch` 下载浏览器二进制。
+
+**虚拟显示下你看不到浏览器实时画面。** 关键步骤会截图到 `output/`。默认的魔术链接
+路径全程无需人工实时交互，不受影响；但如果走到验证码那条路弹出了 hCaptcha 拖拽题，
+在没有图形界面的机器上就没法手动拖拽——需要换到带显示的环境，或接 VNC。
 
 **Cloudflare。** claude.ai 前面有 Cloudflare 挑战，实测等待时长在 30 秒到 120 秒以上之间波动，有时会直接超时，偶尔放行后还会返回一个完全空白、没有任何输入框的页面。这不是脚本的问题，重试或换个时间即可。超时会自动截图到 `output/waiting_login.png`。
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
+from camoufox.sync_api import Camoufox
 from playwright.sync_api import Page, expect
 
 from claude_register.console import log, prompt
@@ -21,24 +23,40 @@ def screenshot(page: Page, name: str) -> Path:
     return path
 
 
-def launch_browser(p):
-    common = {
-        "headless": False,
-        "args": ["--disable-blink-features=AutomationControlled"],
-    }
+@contextmanager
+def browser_session():
+    """启动 Camoufox（Firefox 系隐身浏览器）会话。
+
+    headless="virtual" 自动包 Xvfb，适配无显示的容器，且比真 headless 更抗
+    Cloudflare 检测；humanize 提供人性化光标移动；locale/geoip 让指纹统一。
+    """
+    cm = Camoufox(
+        headless="virtual",
+        humanize=True,
+        locale="en-US",
+        geoip=True,
+        window=(1280, 900),
+    )
+    # 真正的启动发生在 __enter__（拉起 Firefox / Xvfb），构造函数不会抛——所以只包
+    # __enter__ 才能拦到「没 fetch 二进制」「缺 Xvfb」这类启动失败，并给出可操作的提示。
+    # 不能用 `with` 把 yield 也裹进 try，否则调用方 body 里的页面异常会被误报成启动失败。
     try:
-        browser = p.chromium.launch(channel="chrome", **common)
-        log("已启动本机 Chrome（channel=chrome）")
-        return browser
+        browser = cm.__enter__()
     except Exception as exc:
-        log(f"本机 Chrome 不可用（{exc}），回退到 Playwright Chromium")
-        return p.chromium.launch(**common)
+        raise RuntimeError(
+            f"启动 Camoufox 失败（{exc}）。请先运行 `uv run camoufox fetch` "
+            "下载浏览器二进制，并确认已安装 Xvfb。"
+        ) from exc
+    log("已启动 Camoufox（headless=virtual）")
+    try:
+        yield browser
+    finally:
+        cm.__exit__(None, None, None)
 
 
 def new_page(browser):
     context = browser.new_context(
-        locale="en-US",
-        viewport={"width": 1280, "height": 900},
+        no_viewport=True,
     )
     page = context.new_page()
     page.set_default_timeout(30_000)

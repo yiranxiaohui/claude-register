@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from playwright.sync_api import sync_playwright
-
 from claude_register.anymail import AnyMailClient, Mailbox, load_dotenv
 from claude_register.browser import (
+    browser_session,
     fill_code,
     fill_email,
     hcaptcha_visible,
-    launch_browser,
     new_page,
     open_login,
     open_magic_link,
@@ -55,8 +53,7 @@ def run_browser(
     auto_login: bool,
     code_timeout: float,
 ) -> None:
-    with sync_playwright() as p:
-        browser = launch_browser(p)
+    with browser_session() as browser:
         context, page = new_page(browser)
         try:
             open_login(page)
@@ -138,7 +135,7 @@ def run_browser(
             pause_for_user()
         finally:
             context.close()
-            browser.close()
+            # browser 的关闭交给 browser_session 的上下文退出，这里不重复关。
 
 
 def run(
