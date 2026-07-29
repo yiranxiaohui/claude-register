@@ -8,4 +8,6 @@ __pycache__/
 .superpowers/
 data/
 config.yaml
+web/dist/
+web/node_modules/
 
