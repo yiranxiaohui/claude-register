@@ -12,9 +12,28 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE TABLE IF NOT EXISTS accounts (
   email TEXT UNIQUE, domain TEXT, created_at TEXT, expires_at TEXT,
-  mailbox_id TEXT, last_run_id INTEGER, status TEXT
+  mailbox_id TEXT, last_run_id INTEGER, status TEXT,
+  password TEXT, session_key TEXT, proxy TEXT, display_name TEXT
 );
 """
+
+_ACCOUNT_EXTRA_COLS = (
+    ("password", "TEXT"),
+    ("session_key", "TEXT"),
+    ("proxy", "TEXT"),
+    ("display_name", "TEXT"),
+)
+
+
+def _migrate_accounts(conn: sqlite3.Connection) -> None:
+    """旧库补列：password / session_key / proxy / display_name。"""
+    existing = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(accounts)").fetchall()
+    }
+    for col, typ in _ACCOUNT_EXTRA_COLS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} {typ}")
 
 
 def init_db(path: Path) -> sqlite3.Connection:
@@ -22,6 +41,7 @@ def init_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate_accounts(conn)
     conn.commit()
     return conn
 
@@ -67,14 +87,43 @@ def mark_stale_running_as_failed(conn) -> int:
     return cur.rowcount
 
 
-def upsert_account(conn, email, domain, expires_at, mailbox_id, last_run_id, status) -> None:
+def upsert_account(
+    conn,
+    email,
+    domain,
+    expires_at,
+    mailbox_id,
+    last_run_id,
+    status,
+    *,
+    password: str = "",
+    session_key: str = "",
+    proxy: str = "",
+    display_name: str = "",
+    created_at: str = "",
+) -> None:
     conn.execute(
-        "INSERT INTO accounts(email,domain,created_at,expires_at,mailbox_id,last_run_id,status) "
-        "VALUES(?,?,?,?,?,?,?) "
+        "INSERT INTO accounts(email,domain,created_at,expires_at,mailbox_id,last_run_id,status,"
+        "password,session_key,proxy,display_name) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(email) DO UPDATE SET domain=excluded.domain, "
         "expires_at=excluded.expires_at, mailbox_id=excluded.mailbox_id, "
-        "last_run_id=excluded.last_run_id, status=excluded.status",
-        (email, domain, "", expires_at, mailbox_id, last_run_id, status),
+        "last_run_id=excluded.last_run_id, status=excluded.status, "
+        "password=excluded.password, session_key=excluded.session_key, "
+        "proxy=excluded.proxy, display_name=excluded.display_name",
+        (
+            email,
+            domain,
+            created_at or "",
+            expires_at,
+            mailbox_id,
+            last_run_id,
+            status,
+            password or "",
+            session_key or "",
+            proxy or "",
+            display_name or "",
+        ),
     )
     conn.commit()
 

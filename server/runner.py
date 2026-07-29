@@ -70,7 +70,38 @@ class Runner:
         token2 = browser.set_output_dir(out_dir)
         status = "success"
         try:
-            flow_fn(email=email, domain=domain, config=config)
+            result = flow_fn(email=email, domain=domain, config=config)
+            if isinstance(result, dict) and result.get("email"):
+                acct_email = str(result.get("email") or "")
+                domain_part = acct_email.split("@", 1)[1] if "@" in acct_email else (domain or "")
+                self.conn.execute(
+                    "UPDATE runs SET email=?, domain=? WHERE id=?",
+                    (acct_email, domain_part, rid),
+                )
+                self.conn.commit()
+                acct_status = "success" if result.get("sessionKey") else "needs_manual"
+                db.upsert_account(
+                    self.conn,
+                    acct_email,
+                    domain_part,
+                    None,
+                    str(result.get("mailbox_id") or ""),
+                    rid,
+                    acct_status,
+                    password=str(result.get("password") or ""),
+                    session_key=str(result.get("sessionKey") or ""),
+                    proxy=str(
+                        result.get("proxy")
+                        or getattr(config, "register_proxy", "")
+                        or ""
+                    ),
+                    display_name=str(result.get("display_name") or ""),
+                    created_at=self.now_fn(),
+                )
+                sink(
+                    f"账号入库：{acct_email} status={acct_status} "
+                    f"sessionKey={'有' if result.get('sessionKey') else '无'}"
+                )
         except Exception as exc:  # noqa: BLE001
             status = "failed"
             sink(f"运行出错：{exc!r}")

@@ -17,6 +17,14 @@ def test_start_runs_flow_and_records_success(tmp_path):
         from claude_register import console
         console.log("hi from flow")
         calls["email"] = email
+        return {
+            "email": email or "a@x.com",
+            "password": "",
+            "sessionKey": "sk-ant-from-test",
+            "proxy": "socks5://proxy:1",
+            "display_name": "Alex",
+            "mailbox_id": "mb1",
+        }
 
     rid = r.start(Config(), email="a@x.com", flow_fn=fake_flow)
     # 等线程结束
@@ -26,8 +34,13 @@ def test_start_runs_flow_and_records_success(tmp_path):
         time.sleep(0.05)
     row = db.get_run(conn, rid)
     assert row["status"] == "success"
-    log_txt = (tmp_path / "runs" / str(rid) / "log.txt").read_text()
+    assert row["email"] == "a@x.com"
+    log_txt = (tmp_path / "runs" / str(rid) / "log.txt").read_text(encoding="utf-8")
     assert "hi from flow" in log_txt
+    accts = db.list_accounts(conn)
+    assert len(accts) == 1
+    assert accts[0]["session_key"] == "sk-ant-from-test"
+    assert accts[0]["proxy"] == "socks5://proxy:1"
 
 
 def test_start_twice_is_busy(tmp_path):
@@ -55,4 +68,4 @@ def test_flow_exception_marks_failed(tmp_path):
             break
         time.sleep(0.05)
     assert db.get_run(conn, rid)["status"] == "failed"
-    assert "kaboom" in (tmp_path / "runs" / str(rid) / "log.txt").read_text()
+    assert "kaboom" in (tmp_path / "runs" / str(rid) / "log.txt").read_text(encoding="utf-8")

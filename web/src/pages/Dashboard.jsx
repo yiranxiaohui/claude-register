@@ -229,7 +229,14 @@ export default function Dashboard() {
               <li key={a.email} className="list-row">
                 <span className="list-main">
                   <span>{a.email}</span>
-                  <span className="list-sub">{a.domain}</span>
+                  <span className="list-sub">
+                    {a.domain || ""}
+                    {a.session_key
+                      ? ` · sk ${String(a.session_key).slice(0, 12)}…`
+                      : ""}
+                    {a.proxy ? " · proxy" : ""}
+                    {a.display_name ? ` · ${a.display_name}` : ""}
+                  </span>
                 </span>
                 <StatusBadge status={a.status} />
                 <button
