@@ -4,6 +4,8 @@
 
 ## 准备
 
+CLI 方式（本地跑 `main.py`）：
+
 1. 复制 `.env.example` 为 `.env`，填写 AnyMail 配置
 2. 安装依赖：
 
@@ -14,7 +16,27 @@ uv run camoufox fetch
 
 AnyMail API Key 需要的 scope：`emails:read` + `accounts:write`（若没固定 `ANYMAIL_DOMAIN`，再加 `domains:read`），并限定账号类型为 `Domain`。
 
-## 启动
+`.env` 环境变量仍然兼容，但**推荐改用 `config.yaml`**（见下方「Web 面板部署」）——CLI 也支持 `uv run main.py --config config.yaml` 直接读同一份配置文件，无需再维护两套配置。
+
+## Web 面板部署
+
+项目自带一个 Web 管理面板（登录、触发注册、实时日志、历史/账号列表、设置项），用 Docker 部署：
+
+1. 复制 `config.example.yaml` 为 `config.yaml`，填写 `anymail` 段（API Key / base_url / domain）和 `panel.password`（面板登录密码）
+2. 拉镜像并启动：
+
+```text
+docker compose pull
+docker compose up -d
+```
+
+3. 浏览器打开 `http://<部署机器 IP>:8790`，用 `config.yaml` 里的 `panel.password` 登录
+
+`docker-compose.yml` 默认把 `./data`（sqlite + 运行记录）和 `./config.yaml` 挂进容器；镜像由 CI（`.github/workflows/build.yml`，跑在 self-hosted runner 上）构建推送到 `ghcr.io/yiranxiaohui/claude-register`，**部署机器只 `pull`，不在本地跑 `docker build`**。
+
+面板里改的设置会写回 `config.yaml`，接口和日志里 AnyMail Key 等敏感字段做了脱敏。
+
+## 启动（CLI）
 
 选后缀 → 建邮箱 → 自动登录：
 

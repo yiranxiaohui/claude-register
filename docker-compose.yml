@@ -1,0 +1,8 @@
+services:
+  claude-register:
+    image: ghcr.io/yiranxiaohui/claude-register:latest
+    restart: unless-stopped
+    ports: ["8790:8790"]
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml
