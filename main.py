@@ -8,13 +8,16 @@
   uv run main.py --login-timeout 180   等待邮件超时秒数（0=跳过等待）
 
   旧参数名 --no-auto-code / --code-timeout 仍可用（别名，向后兼容）。
+  uv run main.py --config config.yaml  从 config.yaml 读配置（面板同款配置文件）
 """
 
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from claude_register.flow import run
+from server.config_store import load_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,16 +55,23 @@ def build_parser() -> argparse.ArgumentParser:
             "剩余预算留给登录链接轮询，总等待时间不会超过这里设的值。"
         ),
     )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help="从 config.yaml 读配置（面板同款配置文件）；给了则覆盖 env 相关设置",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    config = load_config(Path(args.config)) if args.config else None
     run(
         email=args.email,
         domain=args.domain,
         auto_login=not args.no_auto_login,
         code_timeout=args.login_timeout,
+        config=config,
     )
 
 

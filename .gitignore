@@ -6,4 +6,6 @@ __pycache__/
 .env
 .claude/
 .superpowers/
+data/
+config.yaml
 

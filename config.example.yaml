@@ -1,0 +1,12 @@
+panel:
+  password: "改我"
+  port: 8790
+anymail:
+  api_key: ""
+  base_url: ""
+  domain: ""
+  expires_hours: 24
+register:
+  login_timeout: 120
+  auto_login: true
+  code_regex: ""
