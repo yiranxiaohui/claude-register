@@ -20,6 +20,7 @@ class Config:
     register_login_timeout: float = 120.0
     register_auto_login: bool = True
     register_code_regex: str = ""
+    register_proxy: str = ""
 
 
 def load_config(path: Path) -> Config:
@@ -39,6 +40,7 @@ def load_config(path: Path) -> Config:
         register_login_timeout=float(reg.get("login_timeout", 120.0)),
         register_auto_login=bool(reg.get("auto_login", True)),
         register_code_regex=str(reg.get("code_regex", "") or ""),
+        register_proxy=str(reg.get("proxy", "") or ""),
     )
 
 
@@ -52,6 +54,7 @@ _FIELD_MAP = {
     "register_login_timeout": ("register", "login_timeout"),
     "register_auto_login": ("register", "auto_login"),
     "register_code_regex": ("register", "code_regex"),
+    "register_proxy": ("register", "proxy"),
 }
 
 

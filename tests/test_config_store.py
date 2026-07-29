@@ -37,3 +37,21 @@ def test_redacted_hides_secrets(tmp_path):
     assert d["panel_password"] == REDACTED
     assert d["anymail_api_key"] == REDACTED
     assert d["panel_port"] == 8790
+
+
+def test_register_proxy_roundtrip(tmp_path):
+    path = tmp_path / "config.yaml"
+    cfg = save_config(path, {"register_proxy": "http://user:pass@1.2.3.4:8080"})
+    assert cfg.register_proxy == "http://user:pass@1.2.3.4:8080"
+    assert load_config(path).register_proxy == "http://user:pass@1.2.3.4:8080"
+
+
+def test_register_proxy_default_empty(tmp_path):
+    assert load_config(tmp_path / "missing.yaml").register_proxy == ""
+
+
+def test_register_proxy_not_redacted(tmp_path):
+    path = tmp_path / "config.yaml"
+    save_config(path, {"register_proxy": "http://user:pass@1.2.3.4:8080"})
+    d = to_redacted_dict(load_config(path))
+    assert d["register_proxy"] == "http://user:pass@1.2.3.4:8080"
