@@ -1,0 +1,39 @@
+from pathlib import Path
+from server.config_store import load_config, save_config, to_redacted_dict, REDACTED
+
+
+def test_load_missing_returns_defaults(tmp_path):
+    cfg = load_config(tmp_path / "nope.yaml")
+    assert cfg.panel_port == 8790
+    assert cfg.anymail_expires_hours == 24.0
+    assert cfg.register_auto_login is True
+    assert cfg.panel_password == ""
+
+
+def test_save_then_load_roundtrip(tmp_path):
+    p = tmp_path / "config.yaml"
+    save_config(p, {"panel_password": "secret", "anymail_api_key": "ak_1",
+                    "anymail_base_url": "https://mail.example.com"})
+    cfg = load_config(p)
+    assert cfg.panel_password == "secret"
+    assert cfg.anymail_api_key == "ak_1"
+    assert cfg.anymail_base_url == "https://mail.example.com"
+
+
+def test_save_empty_password_keeps_existing(tmp_path):
+    p = tmp_path / "config.yaml"
+    save_config(p, {"panel_password": "secret"})
+    save_config(p, {"panel_password": "", "anymail_domain": "example.com"})
+    cfg = load_config(p)
+    assert cfg.panel_password == "secret"
+    assert cfg.anymail_domain == "example.com"
+
+
+def test_redacted_hides_secrets(tmp_path):
+    cfg = load_config(tmp_path / "nope.yaml")
+    object.__setattr__(cfg, "panel_password", "secret")
+    object.__setattr__(cfg, "anymail_api_key", "ak_1")
+    d = to_redacted_dict(cfg)
+    assert d["panel_password"] == REDACTED
+    assert d["anymail_api_key"] == REDACTED
+    assert d["panel_port"] == 8790

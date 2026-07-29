@@ -8,6 +8,10 @@ dependencies = [
     "httpx>=0.28.1",
     "playwright>=1.61.0",
     "camoufox[geoip]>=0.4.11",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pyyaml>=6.0",
+    "sse-starlette>=2.1",
 ]
 
 [project.scripts]
