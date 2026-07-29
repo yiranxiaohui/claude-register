@@ -98,37 +98,71 @@ def test_stream_no_duplicate_lines(tmp_path, monkeypatch):
     assert "event: done" in body
 
 
-def test_stream_active_run_reads_queue_not_file(tmp_path, monkeypatch):
-    """活动 run：subscribe 返回队列时不补发 log.txt，避免重复。
+def test_stream_active_run_no_duplicate_over_http(tmp_path, monkeypatch):
+    """真实回归：驱动 /api/runs/{id}/stream 面对 ACTIVE run，断言不重复。
 
-    直接单元验证队列内容 == 文件内容，确保 gen() 从队列读取即为完整一次。
+    旧 gen()（先补发 log.txt 再排空队列）会让两行各出现两次——本测试对旧代码
+    会失败（count==2），对新代码通过（count==1）。
     """
+    import threading
+
     save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
     c = _client(tmp_path)
     c.post("/api/login", json={"password": "pw"})
-    state = c.app.state.cr
 
     import claude_register.flow as flow
     from claude_register import console
 
-    started = __import__("threading").Event()
-    release = __import__("threading").Event()
+    release = threading.Event()
 
     def fake_flow(**kw):
-        console.log("ACTIVE_LINE")
-        started.set()
-        release.wait(timeout=5)
+        console.log("LINE_ONE")
+        console.log("LINE_TWO")
+        # 阻塞让 run 保持活动，直到测试收齐两行日志后放行。
+        release.wait(timeout=10)
 
     monkeypatch.setattr(flow, "run", fake_flow)
 
-    rid = state.runner.start(state.config(), email="a@x.com", flow_fn=flow.run)
-    assert started.wait(timeout=5)
+    rid = c.post("/api/runs", json={"email": "a@x.com"}).json()["run_id"]
 
-    # run 仍活动：subscribe 返回队列（非 None），历史行已在队列中。
-    q = state.runner.subscribe(rid)
-    assert q is not None
-    msg = q.get(timeout=2)
-    assert msg == {"type": "log", "line": "ACTIVE_LINE"}
+    try:
+        # 等两行都落到 log.txt，确保队列已累积这两行（旧 bug 的触发前提）。
+        run_dir = tmp_path / "runs" / str(rid)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            lp = run_dir / "log.txt"
+            if lp.exists() and "LINE_ONE" in lp.read_text() and "LINE_TWO" in lp.read_text():
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("两行日志未在超时内写入")
+        # 此刻 run 仍活动（fake_flow 阻塞在 release 上）。
+        assert c.get(f"/api/runs/{rid}").json()["status"] == "running"
 
-    release.set()
-    _wait_idle(c, rid)
+        log_events: list[str] = []
+        done_seen = False
+        cur_event = None
+        with c.stream("GET", f"/api/runs/{rid}/stream") as resp:
+            assert resp.status_code == 200
+            for raw in resp.iter_lines():
+                line = raw.decode() if isinstance(raw, bytes) else raw
+                if line.startswith("event:"):
+                    cur_event = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    data = line.split(":", 1)[1].strip()
+                    if cur_event == "log":
+                        log_events.append(data)
+                        # 收齐两行后放行 fake_flow，触发 done。
+                        if release is not None and not release.is_set() and \
+                                log_events.count("LINE_ONE") and log_events.count("LINE_TWO"):
+                            release.set()
+                    elif cur_event == "done":
+                        done_seen = True
+                        break
+    finally:
+        release.set()
+        _wait_idle(c, rid)
+
+    assert log_events.count("LINE_ONE") == 1, log_events
+    assert log_events.count("LINE_TWO") == 1, log_events
+    assert done_seen
