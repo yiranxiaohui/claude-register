@@ -6,6 +6,7 @@ import contextvars
 import os
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from camoufox.sync_api import Camoufox
 from playwright.sync_api import Page, expect
@@ -20,6 +21,34 @@ _output_dir: contextvars.ContextVar = contextvars.ContextVar("output_dir", defau
 
 def set_output_dir(path) -> contextvars.Token:
     return _output_dir.set(Path(path))
+
+
+def parse_proxy(url: str | None) -> dict | None:
+    """把代理 URL 解析成 Playwright 风格 proxy dict。
+
+    空 → None（直连）。scheme/host/port 缺一 → ValueError（不静默降级直连，
+    避免用户以为走了代理实际在裸奔）。
+    """
+    text = (url or "").strip()
+    if not text:
+        return None
+    hint = (
+        f"代理地址格式不对：{text!r}。应形如 "
+        "http://host:port、http://user:pass@host:port 或 socks5://host:port"
+    )
+    try:
+        parts = urlsplit(text)
+        port = parts.port  # 端口非数字时这里抛 ValueError
+    except ValueError as exc:
+        raise ValueError(hint) from exc
+    if not parts.scheme or not parts.hostname or port is None:
+        raise ValueError(hint)
+    proxy: dict = {"server": f"{parts.scheme}://{parts.hostname}:{port}"}
+    if parts.username:
+        proxy["username"] = unquote(parts.username)
+    if parts.password:
+        proxy["password"] = unquote(parts.password)
+    return proxy
 
 
 def screenshot(page: Page, name: str) -> Path:
