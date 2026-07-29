@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,10 +15,17 @@ from claude_register.console import log, prompt
 URL = "https://claude.ai/login"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 
+_output_dir: contextvars.ContextVar = contextvars.ContextVar("output_dir", default=OUTPUT_DIR)
+
+
+def set_output_dir(path) -> contextvars.Token:
+    return _output_dir.set(Path(path))
+
 
 def screenshot(page: Page, name: str) -> Path:
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    path = OUTPUT_DIR / name
+    d = _output_dir.get()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / name
     page.screenshot(path=path, full_page=True)
     log(f"截图已保存：{path}")
     return path
