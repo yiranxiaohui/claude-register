@@ -14,6 +14,8 @@ const FIELD_DEFS = [
   { key: "register_login_timeout", label: "登录超时（秒）", type: "number" },
   { key: "register_auto_login", label: "注册后自动登录", type: "checkbox" },
   { key: "register_code_regex", label: "验证码正则", type: "text" },
+  { key: "register_proxy", label: "注册代理（留空直连）", type: "text",
+    placeholder: "http://user:pass@host:port 或 socks5://host:port" },
 ];
 
 export default function Settings() {
@@ -86,7 +88,7 @@ export default function Settings() {
                 id={f.key}
                 className="input"
                 type={f.type}
-                placeholder={f.secret ? SECRET_PLACEHOLDER : ""}
+                placeholder={f.secret ? SECRET_PLACEHOLDER : f.placeholder ?? ""}
                 value={form[f.key] ?? ""}
                 onChange={(e) =>
                   setField(
