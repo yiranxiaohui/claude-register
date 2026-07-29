@@ -17,6 +17,9 @@ app = create_app(data_dir=DATA_DIR, config_path=CONFIG_PATH)
 
 def main() -> None:
     cfg = load_config(CONFIG_PATH)
+    if not cfg.panel_password:
+        print("⚠️  未设置面板密码：仅开放配置接口（/api/config），其余接口全部 401。"
+              "请尽快在设置页设定密码后再使用。", flush=True)
     uvicorn.run(app, host="0.0.0.0", port=cfg.panel_port)
 
 
