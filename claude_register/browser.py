@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import contextvars
-import os
+import random
+import re
+import shutil
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -11,11 +14,19 @@ from urllib.parse import unquote, urlsplit
 from camoufox.sync_api import Camoufox
 from playwright.sync_api import Page, expect
 
-from claude_register.console import current_sink, log, prompt
+from claude_register.console import current_sink, log
 from claude_register.socks_relay import SocksRelay
 
 URL = "https://claude.ai/login"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
+
+# onboarding 单步「页面还在、控件却找不到」的最长容忍时间。按钮点下后会进 loading
+# 态（文字被 spinner 顶掉），此时按名字定位必然落空，需要给请求飞行留出窗口；超过
+# 这个时长仍无进展，才认定是真卡住。
+_STEP_STALL_MS = 20_000
+# 页面"什么都认不出来"时的最长容忍时间。客户端路由切换途中 DOM 会短暂空白，
+# 此时探针全落空，但下一步其实马上就渲染出来了。
+_BLANK_TRANSITION_MS = 10_000
 
 # Playwright 的 toJugglerProxyOptions 只认这四个 scheme；碰上不认识的会静默降级成
 # http 代理（`let type = "http"` 的默认分支），于是浏览器拿 HTTP CONNECT 去捅一个
@@ -97,6 +108,30 @@ def screenshot(page: Page, name: str) -> Path:
     return path
 
 
+def pick_headless() -> str | bool:
+    """按平台选 headless 档位。
+
+    "virtual" 就是 Xvfb（X11 虚拟帧缓冲）：camoufox 会 Popen 一个 Xvfb 进程再把
+    DISPLAY 塞进环境变量。它在 virtdisplay.py 里 assert_linux() 拦掉非 Linux 平台
+    ——Windows 的 camoufox.exe 是原生 Win32 构建，不走 X11，DISPLAY 对它没有意义。
+    所以 virtual 不是「还没适配 Windows」，是概念上不存在。
+
+    但 virtual 要解决的问题（无显示器的机器上不想用真 headless，指纹太弱）在有桌面的
+    平台上本来就不存在：直接 headless=False 用真显示器，比 Xvfb 还真。于是：
+
+        Linux + 有 Xvfb  → "virtual"  容器/无头服务器的既有路径
+        Linux 无 Xvfb    → True       只剩真 headless，指纹弱一档但能跑
+        Windows / macOS  → False      桌面就是显示器，开真窗口
+
+    判 Linux 用 sys.platform 而不是只查 which("Xvfb")：camoufox 拦的是
+    OS_NAME != 'lin'，装了 WSL/Cygwin 的 Windows 上 which 可能真的命中一个
+    Xvfb.exe，那时选 virtual 依然会崩。
+    """
+    if sys.platform.startswith("linux"):
+        return "virtual" if shutil.which("Xvfb") else True
+    return False
+
+
 def needs_relay(proxy_cfg: dict | None) -> bool:
     """带凭据的 SOCKS5 需要本地中继。
 
@@ -148,8 +183,9 @@ def validate_proxy(url: str | None) -> dict | None:
 def browser_session(proxy: str | None = None):
     """启动 Camoufox（Firefox 系隐身浏览器）会话。
 
-    headless="virtual" 自动包 Xvfb，适配无显示的容器，且比真 headless 更抗
-    Cloudflare 检测；humanize 提供人性化光标移动；locale/geoip 让指纹统一
+    headless 档位由 pick_headless() 按平台自动选：Linux 容器走 "virtual"（Xvfb），
+    Windows/macOS 走 False（桌面真显示器）。两者都比真 headless 更抗 Cloudflare 检测。
+    humanize 提供人性化光标移动；locale/geoip 让指纹统一
     （配了代理时 geoip 按代理出口 IP 匹配时区/地理指纹）。
 
     带认证的 SOCKS5 会先在本地拉起一个免认证中继（见 socks_relay），
@@ -200,8 +236,9 @@ def browser_session(proxy: str | None = None):
         else:
             kwargs["proxy"] = proxy_cfg
             log(f"使用代理：{proxy_cfg['server']}")
+    headless = pick_headless()
     cm = Camoufox(
-        headless="virtual",
+        headless=headless,
         humanize=True,
         locale="en-US",
         geoip=geoip,
@@ -216,11 +253,14 @@ def browser_session(proxy: str | None = None):
     except Exception as exc:
         if relay is not None:
             relay.stop()
+        # Xvfb 只在真的走 virtual 时才相关。Windows 上装 Xvfb 没有任何用——
+        # camoufox.exe 不走 X11——这句提示会把人往完全错的方向带。
+        extra = "，并确认已安装 Xvfb" if headless == "virtual" else ""
         raise RuntimeError(
             f"启动 Camoufox 失败（{exc}）。请先运行 `uv run camoufox fetch` "
-            "下载浏览器二进制，并确认已安装 Xvfb。"
+            f"下载浏览器二进制{extra}。"
         ) from exc
-    log("已启动 Camoufox（headless=virtual）")
+    log(f"已启动 Camoufox（headless={headless}）")
     try:
         yield browser
     finally:
@@ -291,14 +331,6 @@ def fill_email(page: Page, email: str) -> None:
     expect(continue_btn).to_be_enabled(timeout=10_000)
     continue_btn.click()
     log("已点击 Continue with email")
-
-
-def pause_for_user() -> None:
-    """浏览器保持打开，等用户看完。CLAUDE_REGISTER_NO_PAUSE=1 可跳过。"""
-    if os.getenv("CLAUDE_REGISTER_NO_PAUSE", "").strip().lower() in {"1", "true", "yes"}:
-        log("CLAUDE_REGISTER_NO_PAUSE=1，跳过手动暂停。")
-        return
-    prompt("浏览器保持打开。看完后在终端按回车关闭…")
 
 
 def _code_input(page: Page):
@@ -434,3 +466,1103 @@ def _submit_code(page: Page) -> bool:
         return False
     log("未找到提交按钮。")
     return False
+
+def terms_create_visible(page: Page) -> bool:
+    """是否停在「Let's create your account」条款建号页。"""
+    for build in (
+        lambda: page.get_by_role("heading", name="Let's create your account"),
+        lambda: page.get_by_text("Let's create your account", exact=False),
+        lambda: page.get_by_role("button", name="Create account"),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def team_join_visible(page: Page) -> bool:
+    """是否停在「Join your team」页（邮箱域名已有 Team 时出现）。
+
+    实测截图：提示 Your team at {domain} is already on Claude，
+    选项是 Join 或 Continue with personal account。注册个人号走后者。
+    """
+    for build in (
+        lambda: page.get_by_role("heading", name="Join your team"),
+        lambda: page.get_by_text("Join your team", exact=False),
+        lambda: page.get_by_role("button", name="Continue with personal account"),
+        lambda: page.get_by_text("Continue with personal account", exact=False),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def onboarding_visible(page: Page) -> bool:
+    """是否仍在 onboarding 流程（条款 / 团队 / 用途 / 套餐 / 桌面端 / 首聊前须知 / 名字 / 角色）。"""
+    return (
+        terms_create_visible(page)
+        or team_join_visible(page)
+        or use_case_visible(page)
+        or plan_select_visible(page)
+        or desktop_promo_visible(page)
+        or first_chat_intro_visible(page)
+        or name_step_visible(page)
+        or work_role_visible(page)
+    )
+
+
+def continue_with_personal_account(page: Page) -> bool:
+    """在 Join your team 页选择个人账号，不加入域名团队。
+
+    按文字定位的三条策略在按钮进 loading 态时会全部落空（文字被 spinner 顶掉），
+    故补一条 test-id 兜底。
+    """
+    for build in (
+        lambda: page.get_by_role("button", name="Continue with personal account"),
+        lambda: page.get_by_text("Continue with personal account", exact=True),
+        lambda: page.get_by_text("Continue with personal account", exact=False),
+        lambda: page.get_by_test_id("continue-with-personal-account"),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                loc.first.click()
+                log("已点击 Continue with personal account")
+                return True
+        except Exception as exc:
+            log(f"点击 Continue with personal account 失败（{exc}）。")
+            continue
+    log("未找到 Continue with personal account 按钮。")
+    return False
+
+
+def use_case_visible(page: Page) -> bool:
+    """是否停在「How are you planning to use Claude?」用途选择页。"""
+    for build in (
+        lambda: page.get_by_role("heading", name="How are you planning to use Claude?"),
+        lambda: page.get_by_text("How are you planning to use Claude?", exact=False),
+        lambda: page.get_by_text("For personal use", exact=True),
+        lambda: page.get_by_text("With my team", exact=True),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def select_personal_use(page: Page) -> bool:
+    """用途选择页点 For personal use（不要选 With my team）。"""
+    for build in (
+        lambda: page.get_by_role("button", name="For personal use"),
+        lambda: page.get_by_role("radio", name="For personal use"),
+        lambda: page.get_by_text("For personal use", exact=True),
+        # 卡片可能是可点击的 div/article，用包含标题的区域
+        lambda: page.locator("button, [role='button'], [role='radio'], label, div").filter(
+            has_text="For personal use"
+        ),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                loc.first.click()
+                log("已选择 For personal use")
+                return True
+        except Exception as exc:
+            log(f"点击 For personal use 失败（{exc}）。")
+            continue
+    log("未找到 For personal use 选项。")
+    return False
+
+
+def plan_select_visible(page: Page) -> bool:
+    """是否停在套餐选择页「Plans that grow with you」。"""
+    for build in (
+        lambda: page.get_by_role("heading", name="Plans that grow with you"),
+        lambda: page.get_by_text("Plans that grow with you", exact=False),
+        lambda: page.get_by_role("button", name="Use Claude for free"),
+        lambda: page.get_by_text("Use Claude for free", exact=True),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def select_free_plan(page: Page) -> bool:
+    """套餐页选最左侧 Free：Use Claude for free（不要 Pro/Max）。"""
+    for build in (
+        lambda: page.get_by_role("button", name="Use Claude for free"),
+        lambda: page.get_by_text("Use Claude for free", exact=True),
+        lambda: page.get_by_text("Use Claude for free", exact=False),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                loc.first.click()
+                log("已选择 Use Claude for free")
+                return True
+        except Exception as exc:
+            log(f"点击 Use Claude for free 失败（{exc}）。")
+            continue
+    log("未找到 Use Claude for free 按钮。")
+    return False
+
+
+def desktop_promo_visible(page: Page) -> bool:
+    """是否停在桌面端推广页「Get the most out of Claude on your desktop」。"""
+    for build in (
+        lambda: page.get_by_role(
+            "heading", name="Get the most out of Claude on your desktop"
+        ),
+        lambda: page.get_by_text(
+            "Get the most out of Claude on your desktop", exact=False
+        ),
+        lambda: page.get_by_role("button", name="Download for Windows"),
+        lambda: page.get_by_text("Download for Windows", exact=False),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def skip_desktop_promo(page: Page) -> bool:
+    """桌面端推广页点 Skip，不下载客户端。"""
+    for build in (
+        lambda: page.get_by_role("button", name="Skip"),
+        lambda: page.get_by_role("link", name="Skip"),
+        lambda: page.get_by_text("Skip", exact=True),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                loc.first.click()
+                log("已点击 Skip（跳过桌面端下载）")
+                return True
+        except Exception as exc:
+            log(f"点击 Skip 失败（{exc}）。")
+            continue
+    log("未找到 Skip 按钮。")
+    return False
+
+
+def first_chat_intro_visible(page: Page) -> bool:
+    """是否停在「Before your first chat」须知页。"""
+    for build in (
+        lambda: page.get_by_role("heading", name="Before your first chat"),
+        lambda: page.get_by_text("Before your first chat", exact=False),
+        lambda: page.get_by_text("Help improve our AI models", exact=False),
+        lambda: page.get_by_text("Ad-free chats", exact=False),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def continue_first_chat_intro(page: Page) -> bool:
+    """首聊前须知页点 Continue。
+
+    「Help improve our AI models」开关保持页面默认即可（截图里多为 Off），
+    这里只点 Continue 进入下一步/主界面。
+    """
+    # 优先：该页底部主按钮 Continue（不要误点别处的 Continue with ...）
+    for build in (
+        lambda: page.get_by_role("button", name="Continue", exact=True),
+        lambda: page.get_by_role("button", name="Continue"),
+        lambda: page.get_by_text("Continue", exact=True),
+    ):
+        try:
+            loc = build()
+            n = loc.count()
+            if n < 1:
+                continue
+            # 若有多个 Continue，选可见的、文案恰好是 Continue 的
+            for i in range(n):
+                btn = loc.nth(i) if hasattr(loc, "nth") else loc.first
+                try:
+                    if not btn.is_visible():
+                        continue
+                    text = ""
+                    try:
+                        text = (btn.inner_text() or "").strip()
+                    except Exception:
+                        text = ""
+                    if text and text != "Continue":
+                        continue
+                    btn.click()
+                    log("已点击 Continue（Before your first chat）")
+                    return True
+                except Exception:
+                    continue
+        except Exception as exc:
+            log(f"点击 Continue 失败（{exc}）。")
+            continue
+    log("未找到 Continue 按钮。")
+    return False
+
+
+def chat_home_visible(page: Page) -> bool:
+    """是否已进入 Claude 主聊天界面（老账号登录，或建号完成后）。"""
+    for build in (
+        lambda: page.get_by_placeholder("How can I help you today?"),
+        lambda: page.get_by_placeholder("Reply to Claude"),
+        lambda: page.get_by_role("button", name="New chat"),
+        lambda: page.get_by_test_id("chat-input"),
+        lambda: page.locator("[data-testid='chat-input']"),
+        lambda: page.locator("fieldset textarea, div[contenteditable='true']"),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def wait_post_auth(page: Page, timeout_ms: int = 90_000) -> str:
+    """魔术链接/验证码提交后，等引导页或主界面就绪。
+
+    返回 "onboarding" / "chat" / "unknown"。
+    onboarding 包括条款建号页和 Join your team 页。
+    """
+    step = 2_000
+    waited = 0
+    while waited < timeout_ms:
+        try:
+            if team_join_visible(page):
+                log("检测到 Join your team 页。")
+                return "onboarding"
+            if use_case_visible(page):
+                log("检测到用途选择页。")
+                return "onboarding"
+            if plan_select_visible(page):
+                log("检测到套餐选择页。")
+                return "onboarding"
+            if desktop_promo_visible(page):
+                log("检测到桌面端推广页。")
+                return "onboarding"
+            if first_chat_intro_visible(page):
+                log("检测到首聊前须知页。")
+                return "onboarding"
+            if name_step_visible(page):
+                log("检测到名字填写页。")
+                return "onboarding"
+            if work_role_visible(page):
+                log("检测到工作角色选择页。")
+                return "onboarding"
+            if terms_create_visible(page):
+                log("建号引导页已出现。")
+                return "onboarding"
+            if chat_home_visible(page):
+                log("已进入 Claude 主界面。")
+                return "chat"
+            current_url = page.url
+        except Exception as exc:
+            log(f"等待登录完成时页面不可用（{exc}），停止等待。")
+            return "unknown"
+        log(f"等待登录完成… {waited // 1000}s url={current_url}")
+        try:
+            page.wait_for_timeout(step)
+        except Exception as exc:
+            log(f"等待登录完成期间页面失效（{exc}）。")
+            return "unknown"
+        waited += step
+    log("登录完成后既未出现建号页，也未进入主界面。")
+    return "unknown"
+
+
+def _terms_checkbox(page: Page):
+    """定位服务条款复选框（方框本身，不是条款链接）。
+
+    实测：点「Consumer Terms / Acceptable Use Policy」链接不会勾选，
+    只会跳文档或啥也不做；必须点左侧 checkbox 控件。
+    """
+    for build in (
+        lambda: page.get_by_role("checkbox"),
+        lambda: page.locator("[role='checkbox']"),
+        lambda: page.locator("input[type='checkbox']"),
+        # 有的实现把可点方框做成 button / 无 role 的 span
+        lambda: page.locator("label").filter(
+            has_text="I agree to Anthropic"
+        ).locator("[role='checkbox'], input[type='checkbox'], button, span").first,
+        lambda: page.locator("[data-state]").filter(has_text="I agree").first,
+    ):
+        try:
+            loc = build()
+            # locator.first 没有 count 语义时走 is_visible
+            try:
+                count = loc.count()
+            except Exception:
+                count = 1
+            if count >= 1:
+                target = loc.first if hasattr(loc, "first") else loc
+                try:
+                    if target.is_visible():
+                        return target
+                except Exception:
+                    return target
+        except Exception:
+            continue
+    return None
+
+
+def _terms_is_checked(page: Page, box=None) -> bool:
+    """确认条款已被勾选。自定义组件可能没有原生 checked，要看 aria/data-state。"""
+    candidates = []
+    if box is not None:
+        candidates.append(box)
+    try:
+        loc = page.get_by_role("checkbox")
+        if loc.count() >= 1:
+            candidates.append(loc.first)
+    except Exception:
+        pass
+    try:
+        loc = page.locator("[role='checkbox'], input[type='checkbox']")
+        if loc.count() >= 1:
+            candidates.append(loc.first)
+    except Exception:
+        pass
+
+    for cand in candidates:
+        try:
+            if bool(cand.is_checked()):
+                return True
+        except Exception:
+            pass
+        for attr, ok in (
+            ("aria-checked", "true"),
+            ("data-state", "checked"),
+            ("data-checked", "true"),
+            ("aria-pressed", "true"),
+        ):
+            try:
+                val = cand.get_attribute(attr)
+                if val is not None and val.lower() == ok:
+                    return True
+            except Exception:
+                continue
+        try:
+            cls = cand.get_attribute("class") or ""
+            if "checked" in cls.lower():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _click_terms_checkbox(page: Page, box) -> bool:
+    """想办法把方框点上。避免点到条款 <a> 链接。"""
+    # 1) 原生 check()
+    try:
+        box.check(force=True)
+        if _terms_is_checked(page, box):
+            return True
+    except Exception:
+        pass
+
+    # 2) 点控件本身（左上角，躲开右侧文字/链接）
+    try:
+        box.click(force=True, position={"x": 4, "y": 4})
+        page.wait_for_timeout(200)
+        if _terms_is_checked(page, box):
+            return True
+    except Exception:
+        pass
+    try:
+        box.click(force=True)
+        page.wait_for_timeout(200)
+        if _terms_is_checked(page, box):
+            return True
+    except Exception:
+        pass
+
+    # 3) 键盘：聚焦后空格切换
+    try:
+        box.focus()
+        page.keyboard.press("Space")
+        page.wait_for_timeout(200)
+        if _terms_is_checked(page, box):
+            return True
+    except Exception:
+        pass
+
+    # 4) JS：直接点 checkbox / 设 aria，并派发事件
+    try:
+        ok = page.evaluate(
+            """() => {
+                const sel = [
+                    '[role="checkbox"]',
+                    'input[type="checkbox"]',
+                    'label',
+                ];
+                let el = null;
+                for (const s of sel) {
+                    const nodes = Array.from(document.querySelectorAll(s));
+                    el = nodes.find(n => {
+                        const t = (n.innerText || n.textContent || '').toLowerCase();
+                        const isBox = n.getAttribute('role') === 'checkbox'
+                            || (n.tagName === 'INPUT' && n.type === 'checkbox');
+                        if (isBox) return true;
+                        return t.includes('i agree') || t.includes('acceptable use');
+                    }) || null;
+                    if (el) break;
+                }
+                if (!el) return false;
+                // 若拿到的是 label，优先点里面的 checkbox 控件
+                const box = el.matches('[role="checkbox"], input[type="checkbox"]')
+                    ? el
+                    : (el.querySelector('[role="checkbox"], input[type="checkbox"]') || el);
+                box.click();
+                if (box.tagName === 'INPUT') {
+                    box.checked = true;
+                    box.dispatchEvent(new Event('input', { bubbles: true }));
+                    box.dispatchEvent(new Event('change', { bubbles: true }));
+                } else {
+                    box.setAttribute('aria-checked', 'true');
+                    box.setAttribute('data-state', 'checked');
+                    box.dispatchEvent(new Event('click', { bubbles: true }));
+                }
+                return true;
+            }"""
+        )
+        page.wait_for_timeout(200)
+        if ok and _terms_is_checked(page, box):
+            return True
+        # JS 点了但属性检测仍失败——有的组件用内部 state，
+        # 再信一次「至少点过」由调用方结合错误提示重试。
+        if ok:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _agree_error_visible(page: Page) -> bool:
+    """点 Create 但没勾选时的红字：Agree to the terms to continue。"""
+    for text in (
+        "Agree to the terms to continue",
+        "Agree to the terms",
+    ):
+        try:
+            loc = page.get_by_text(text, exact=False)
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def accept_terms_and_create_account(page: Page) -> bool:
+    """勾选 Anthropic 条款并点击 Create account。
+
+    对应截图：claude.ai/onboarding 上的
+    「I agree to Anthropic's Consumer Terms...」+「Create account」。
+    未勾选就点 Create 会出红字 Agree to the terms to continue——
+    所以这里必须先验证勾选状态，失败就重试，绝不「以为点了就算了」。
+    """
+    box = _terms_checkbox(page)
+
+    checked = False
+    if box is not None and _terms_is_checked(page, box):
+        checked = True
+        log("服务条款原本已勾选。")
+    elif box is not None:
+        for attempt in range(1, 4):
+            log(f"尝试勾选服务条款（第 {attempt} 次）…")
+            if _click_terms_checkbox(page, box):
+                # 再读一次，自定义组件可能延迟更新
+                page.wait_for_timeout(300)
+                if _terms_is_checked(page, box) or attempt >= 2:
+                    # attempt>=2：JS 路径可能改了内部 state 但属性读不到，
+                    # 交给后面点 Create 后的红字检测兜底。
+                    checked = True
+                    log("已勾选服务条款。")
+                    break
+            page.wait_for_timeout(300)
+    else:
+        # 找不到 checkbox 控件时，点 label 左侧（避开链接）
+        log("未定位到 checkbox 控件，改点条款行左侧。")
+        for build in (
+            lambda: page.locator("label").filter(has_text="I agree to Anthropic"),
+            lambda: page.get_by_text("I agree to Anthropic", exact=False),
+        ):
+            try:
+                loc = build()
+                if loc.count() >= 1 and loc.first.is_visible():
+                    loc.first.click(position={"x": 8, "y": 8}, force=True)
+                    page.wait_for_timeout(300)
+                    checked = True
+                    log("已通过条款行左侧点击尝试勾选。")
+                    break
+            except Exception as exc:
+                log(f"点击条款行失败（{exc}）。")
+                continue
+
+    if not checked:
+        log("无法勾选服务条款复选框。")
+        return False
+
+    try:
+        page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+    # 点 Create account；若冒出红字则重新勾选再点一次
+    for round_i in range(1, 4):
+        try:
+            btn = page.get_by_role("button", name="Create account")
+            if btn.count() < 1:
+                btn = page.get_by_text("Create account", exact=True)
+            if btn.count() < 1 or not btn.first.is_visible():
+                log("未找到 Create account 按钮。")
+                return False
+            target = btn.first
+            try:
+                expect(target).to_be_enabled(timeout=10_000)
+            except Exception:
+                pass
+            target.click()
+            log(f"已点击 Create account（第 {round_i} 次）")
+        except Exception as exc:
+            log(f"点击 Create account 失败（{exc}）。")
+            return False
+
+        try:
+            page.wait_for_timeout(800)
+        except Exception:
+            pass
+
+        if not _agree_error_visible(page):
+            return True
+
+        log("页面提示 Agree to the terms to continue——勾选未生效，重试。")
+        box = _terms_checkbox(page) or box
+        if box is not None:
+            _click_terms_checkbox(page, box)
+            page.wait_for_timeout(400)
+        else:
+            try:
+                page.locator("label").filter(
+                    has_text="I agree to Anthropic"
+                ).first.click(position={"x": 8, "y": 8}, force=True)
+            except Exception:
+                pass
+
+    log("多次尝试后仍无法通过条款勾选。")
+    return False
+
+
+_DISPLAY_FIRST_NAMES = (
+    "Alex",
+    "Sam",
+    "Jordan",
+    "Taylor",
+    "Casey",
+    "Riley",
+    "Morgan",
+    "Quinn",
+    "Avery",
+    "Jamie",
+    "Cameron",
+    "Reese",
+)
+
+
+def default_display_name(email: str | None = None) -> str:
+    """生成看起来像真人的显示名；邮箱 local 不像人名时随机挑一个。"""
+    if email:
+        local = (email.split("@", 1)[0] or "").strip()
+        cleaned = re.sub(r"[0-9._+-]+", " ", local)
+        parts = [p for p in cleaned.split() if p.isalpha() and len(p) >= 3]
+        skip = {"claude", "user", "test", "mail", "email", "admin", "info", "xyz"}
+        for part in parts:
+            if part.lower() not in skip:
+                return part[:1].upper() + part[1:].lower()
+    return random.choice(_DISPLAY_FIRST_NAMES)
+
+
+def name_step_visible(page: Page) -> bool:
+    """是否停在「What's your name?」填写页。"""
+    for build in (
+        lambda: page.get_by_role("heading", name="What's your name?"),
+        lambda: page.get_by_text("What's your name?", exact=False),
+        lambda: page.get_by_text("So Claude knows what to call you", exact=False),
+        lambda: page.get_by_placeholder("Enter your name"),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _name_input(page: Page):
+    for build in (
+        lambda: page.get_by_placeholder("Enter your name"),
+        lambda: page.get_by_label("Preferred name"),
+        lambda: page.get_by_label("What should we call you"),
+        lambda: page.get_by_label("Your name"),
+        lambda: page.get_by_role("textbox", name="Enter your name"),
+        lambda: page.locator("input[name='name']"),
+        lambda: page.locator("input[autocomplete='name']"),
+        lambda: page.locator("input[type='text']"),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return loc.first
+        except Exception:
+            continue
+    return None
+
+
+def _click_name_continue(page: Page) -> bool:
+    """名字页底部 Continue：填名前是 disabled 灰色，需等可点。"""
+    for build in (
+        lambda: page.get_by_role("button", name="Continue", exact=True),
+        lambda: page.get_by_role("button", name="Continue"),
+        lambda: page.get_by_role("button", name="Next", exact=True),
+        lambda: page.get_by_test_id("continue"),
+    ):
+        try:
+            loc = build()
+            n = loc.count()
+            if n < 1:
+                continue
+            for i in range(n):
+                btn = loc.nth(i) if hasattr(loc, "nth") else loc.first
+                try:
+                    if not btn.is_visible():
+                        continue
+                    text = ""
+                    try:
+                        text = (btn.inner_text() or "").strip()
+                    except Exception:
+                        text = ""
+                    if text and text not in {"Continue", "Next"}:
+                        continue
+                    for _ in range(30):
+                        enabled = True
+                        try:
+                            enabled = btn.is_enabled()
+                        except Exception:
+                            enabled = True
+                        if enabled:
+                            break
+                        page.wait_for_timeout(100)
+                    try:
+                        if hasattr(btn, "is_enabled") and not btn.is_enabled():
+                            continue
+                    except Exception:
+                        pass
+                    btn.click()
+                    log("已点击 Continue（What's your name?）")
+                    return True
+                except Exception:
+                    continue
+        except Exception as exc:
+            log(f"点击名字页 Continue 失败（{exc}）。")
+            continue
+    return False
+
+
+def fill_display_name_and_continue(page: Page, name: str | None = None) -> bool:
+    """在 What's your name? 页填入名字并点 Continue。"""
+    display = (name or "").strip() or default_display_name()
+    box = _name_input(page)
+    if box is None:
+        log("未找到名字输入框。")
+        return False
+    try:
+        box.click()
+        try:
+            box.fill("")
+        except Exception:
+            pass
+        try:
+            box.press_sequentially(display, delay=40)
+        except Exception:
+            box.fill(display)
+        log(f"已填入显示名：{display}")
+        page.wait_for_timeout(300)
+        if _click_name_continue(page):
+            return True
+        try:
+            box.press("Enter")
+            log("已对名字输入框按 Enter 提交。")
+            return True
+        except Exception:
+            pass
+        log("已填名字但未能点击 Continue。")
+        return False
+    except Exception as exc:
+        log(f"填写显示名失败（{exc}）。")
+        return False
+
+
+def maybe_fill_display_name(page: Page, name: str | None = None) -> bool:
+    """兼容旧调用：仅当名字页可见时填写并 Continue。
+
+    没有该步骤时返回 False，不算失败。
+    """
+    if not name_step_visible(page) and _name_input(page) is None:
+        return False
+    return fill_display_name_and_continue(page, name=name)
+
+
+def work_role_visible(page: Page) -> bool:
+    """是否停在「What kind of work do you do?」角色选择页。"""
+    for build in (
+        lambda: page.get_by_role("heading", name="What kind of work do you do?"),
+        lambda: page.get_by_text("What kind of work do you do?", exact=False),
+        lambda: page.get_by_text("Pick a role so Claude can tailor your experience", exact=False),
+        lambda: page.get_by_text("Select your role", exact=False),
+        lambda: page.get_by_text("Set up later", exact=True),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def skip_work_role(page: Page) -> bool:
+    """角色选择页点 Set up later，不选具体 role。"""
+    for build in (
+        lambda: page.get_by_role("button", name="Set up later"),
+        lambda: page.get_by_role("link", name="Set up later"),
+        lambda: page.get_by_text("Set up later", exact=True),
+        lambda: page.get_by_text("Set up later", exact=False),
+    ):
+        try:
+            loc = build()
+            if loc.count() >= 1 and loc.first.is_visible():
+                loc.first.click()
+                log("已点击 Set up later（工作角色）")
+                return True
+        except Exception as exc:
+            log(f"点击 Set up later 失败（{exc}）。")
+            continue
+    log("未找到 Set up later。")
+    return False
+
+
+
+def extract_session_key(page: Page) -> str | None:
+    """从浏览器 cookie 读取 Claude sessionKey。"""
+    try:
+        context = page.context
+    except Exception:
+        return None
+    try:
+        cookies = context.cookies()
+    except Exception as exc:
+        log(f"读取 cookies 失败（{exc}）。")
+        return None
+    # 优先精确名；兼容大小写 / 旧字段
+    wanted = {"sessionkey", "session_key"}
+    found = None
+    for c in cookies or []:
+        name = str(c.get("name") or "")
+        if name.lower() in wanted:
+            val = str(c.get("value") or "").strip()
+            if val:
+                # sessionKey 优于其它别名
+                if name == "sessionKey":
+                    return val
+                found = found or val
+    return found
+
+
+def wait_for_session_key(page: Page, timeout_ms: int = 30_000) -> str | None:
+    """登录/建号完成后轮询 sessionKey cookie。"""
+    step = 1_000
+    waited = 0
+    while waited <= timeout_ms:
+        key = extract_session_key(page)
+        if key:
+            log(f"已获取 sessionKey（{len(key)} chars）。")
+            return key
+        if waited >= timeout_ms:
+            break
+        try:
+            page.wait_for_timeout(step)
+        except Exception:
+            break
+        waited += step
+    log("超时仍未在 cookies 中找到 sessionKey。")
+    return None
+
+
+def dump_cookies(page: Page) -> list[dict]:
+    """调试用：导出当前 context 全部 cookie（不含落盘）。"""
+    try:
+        return list(page.context.cookies() or [])
+    except Exception:
+        return []
+
+
+def _still_on_onboarding_url(page: Page) -> bool:
+    """URL 是否还在 onboarding 路径下。
+
+    DOM 探针在客户端路由切换途中会全部落空（页面短暂空白），此时 URL 是比 DOM
+    更可靠的信号：还挂在 /onboarding 就说明没走完。
+    """
+    try:
+        return "/onboarding" in urlsplit(page.url).path
+    except Exception:
+        return False
+
+
+def _onboarding_steps(display_name: str | None) -> list[dict]:
+    """onboarding 各步：判定 / 动作 / 截图 / 放弃时的话术。顺序即优先级。
+
+    每步形状一致，逐个 if 抄八遍只会让「某一步漏改」变成必然，故收成表。
+    """
+    return [
+        {
+            "key": "team_join",
+            "label": "Join your team",
+            "visible": team_join_visible,
+            "act": continue_with_personal_account,
+            "shot": "team_join.png",
+            "fail_shot": "team_join_failed.png",
+            "fail_msg": "无法跳过 Join your team，请手动点 Continue with personal account。",
+        },
+        {
+            "key": "use_case",
+            "label": "用途选择",
+            "visible": use_case_visible,
+            "act": select_personal_use,
+            "shot": "use_case.png",
+            "fail_shot": "use_case_failed.png",
+            "fail_msg": "无法选择 For personal use，请手动点击。",
+        },
+        {
+            "key": "plan_select",
+            "label": "套餐选择",
+            "visible": plan_select_visible,
+            "act": select_free_plan,
+            "shot": "plan_select.png",
+            "fail_shot": "plan_select_failed.png",
+            "fail_msg": "无法选择 Use Claude for free，请手动点击。",
+        },
+        {
+            "key": "desktop_promo",
+            "label": "桌面端推广",
+            "visible": desktop_promo_visible,
+            "act": skip_desktop_promo,
+            "shot": "desktop_promo.png",
+            "fail_shot": "desktop_promo_failed.png",
+            "fail_msg": "无法跳过桌面端推广，请手动点 Skip。",
+        },
+        {
+            "key": "first_chat",
+            "label": "首聊前须知",
+            "visible": first_chat_intro_visible,
+            "act": continue_first_chat_intro,
+            "shot": "first_chat_intro.png",
+            "fail_shot": "first_chat_intro_failed.png",
+            "fail_msg": "无法点击 Continue（Before your first chat），请手动点。",
+        },
+        {
+            "key": "name_step",
+            "label": "名字填写",
+            "visible": name_step_visible,
+            "act": lambda p: fill_display_name_and_continue(
+                p, name=display_name or default_display_name()
+            ),
+            "shot": "name_step.png",
+            "fail_shot": "name_step_failed.png",
+            "fail_msg": "无法填写名字并 Continue，请手动完成。",
+        },
+        {
+            "key": "work_role",
+            "label": "工作角色选择",
+            "visible": work_role_visible,
+            "act": skip_work_role,
+            "shot": "work_role.png",
+            "fail_shot": "work_role_failed.png",
+            "fail_msg": "无法点击 Set up later，请手动点。",
+        },
+        {
+            "key": "terms",
+            "label": "条款建号",
+            "visible": terms_create_visible,
+            "act": accept_terms_and_create_account,
+            "shot": None,  # 进 onboarding 时已截过 onboarding.png
+            "fail_shot": "onboarding_failed.png",
+            "fail_msg": "无法完成条款建号，请手动点 Create account。",
+        },
+    ]
+
+
+def finish_after_auth(page: Page, timeout_ms: int = 90_000, display_name: str | None = None) -> bool:
+    """登录凭证生效后的收尾：等页面 → 走完 onboarding 各步 → 截图。
+
+    新账号常见顺序（多步顺序不固定）：
+      Join your team → Continue with personal account
+      How are you planning to use Claude? → For personal use
+      Plans that grow with you → Use Claude for free
+      Get the most out of Claude on your desktop → Skip
+      Before your first chat → Continue
+      What's your name? → 填名字 → Continue
+      What kind of work do you do? → Set up later
+      Let's create your account → 勾条款 → Create account
+      主界面
+
+    老账号：直接落到主界面。
+    """
+    state = wait_post_auth(page, timeout_ms=timeout_ms)
+    if state == "chat":
+        screenshot(page, "logged_in.png")
+        log(f"当前地址：{page.url}")
+        return True
+
+    if state != "onboarding":
+        screenshot(page, "post_auth_unknown.png")
+        try:
+            log(f"当前地址：{page.url}")
+        except Exception:
+            pass
+        return False
+
+    screenshot(page, "onboarding.png")
+
+    step = 2_000
+    waited = 0
+    # 整段 onboarding 共用剩余预算；至少留 60s 给多步点击。
+    follow_timeout = max(60_000, timeout_ms)
+    progressed = False
+
+    steps = _onboarding_steps(display_name)
+    # 每步的停滞账本：clicked=成功点过几次，ms=当前这轮找不到控件已经耗了多久。
+    stalls: dict[str, dict[str, int]] = {}
+    # 连续多少轮"什么都认不出来"——用来区分路由切换空白期和真的走完了。
+    blank_rounds = 0
+
+    while waited < follow_timeout:
+        try:
+            if chat_home_visible(page):
+                log("建号完成，已进入主界面。")
+                screenshot(page, "after_create_account.png")
+                log(f"当前地址：{page.url}")
+                return True
+
+            handled = False
+            for item in steps:
+                if not item["visible"](page):
+                    continue
+
+                state = stalls.setdefault(item["key"], {"clicked": 0, "ms": 0, "shot": 0})
+                # 只在首次进入该步时截图：等 spinner 期间每轮重截同名图纯属浪费，
+                # 真卡住时另有 *_failed.png 记录终态。
+                if item["shot"] and not state["shot"]:
+                    screenshot(page, item["shot"])
+                    state["shot"] = 1
+
+                if item["act"](page):
+                    if state["clicked"]:
+                        log(f"仍在{item['label']}页，已重新点击。")
+                    state["clicked"] += 1
+                    state["ms"] = 0
+                    progressed = True
+                    page.wait_for_timeout(1_500)
+                    waited += 1_500
+                    handled = True
+                    break
+
+                # 找不到控件多半不是页面异常，而是上一次点击还在飞：按钮进 loading 态后
+                # 文字被 spinner 顶掉，按名字定位必然落空，而 heading 还在 → 上层仍判定
+                # "停在本页"。这里必须等它转完，不能一次没找到就判死（run 6 的坑）。
+                if state["ms"] < _STEP_STALL_MS:
+                    state["ms"] += step
+                    log(f"{item['label']}处理中… {state['ms'] // 1000}s")
+                    page.wait_for_timeout(step)
+                    waited += step
+                    handled = True
+                    break
+
+                screenshot(page, item["fail_shot"])
+                log(item["fail_msg"])
+                return False
+
+            if handled:
+                continue
+
+            # 3) 兜底：未命中 name_step_visible 但出现名字输入框
+            if maybe_fill_display_name(page, name=display_name):
+                progressed = True
+                page.wait_for_timeout(1_000)
+                waited += 1_000
+                continue
+
+            # 已经推进过、又不再识别为 onboarding——可能真跳转了，也可能只是客户端
+            # 路由切换途中 DOM 短暂空白（run 7 的坑：截图全黑、探针全落空，但紧接着
+            # 用途选择页就渲染出来了）。两道闸：URL 必须已离开 /onboarding，且要连续
+            # 若干轮都认不出 onboarding，才认定收尾。
+            if progressed and not onboarding_visible(page):
+                if _still_on_onboarding_url(page):
+                    blank_rounds += 1
+                    if blank_rounds * step < _BLANK_TRANSITION_MS:
+                        log(f"页面切换中… {blank_rounds * step // 1000}s")
+                        page.wait_for_timeout(step)
+                        waited += step
+                        continue
+                log("已离开 onboarding 页面。")
+                screenshot(page, "after_create_account.png")
+                log(f"当前地址：{page.url}")
+                return True
+            blank_rounds = 0
+
+            current_url = page.url
+        except Exception as exc:
+            log(f"建号后续等待时页面不可用（{exc}）。")
+            try:
+                screenshot(page, "after_create_account.png")
+            except Exception:
+                pass
+            return progressed
+
+        log(f"等待建号完成… {waited // 1000}s url={current_url}")
+        try:
+            page.wait_for_timeout(step)
+        except Exception as exc:
+            log(f"建号后续等待失败（{exc}）。")
+            return progressed
+        waited += step
+
+    screenshot(page, "after_create_account.png")
+    try:
+        log(f"建号后未在超时内进入主界面。当前地址：{page.url}")
+    except Exception:
+        pass
+    # 关键步骤点过就大致成功，浏览器留给人工确认。
+    return progressed

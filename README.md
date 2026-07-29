@@ -83,14 +83,23 @@ uv run main.py --login-timeout 0
 
 ## 已知的坑
 
-**浏览器引擎是 Camoufox（Firefox 系隐身浏览器），不是 Chromium。** 它以
-`headless="virtual"` 模式运行——自动包一层 Xvfb 虚拟显示，既适配无图形界面的
-服务器/容器，也比真 headless 更能扛住 Cloudflare 挑战。运行前需装好 Xvfb，并跑过
-一次 `uv run camoufox fetch` 下载浏览器二进制。
+**浏览器引擎是 Camoufox（Firefox 系隐身浏览器），不是 Chromium。** headless 档位
+按平台自动选，不用手动改代码：
 
-**虚拟显示下你看不到浏览器实时画面。** 关键步骤会截图到 `output/`。默认的魔术链接
-路径全程无需人工实时交互，不受影响；但如果走到验证码那条路弹出了 hCaptcha 拖拽题，
-在没有图形界面的机器上就没法手动拖拽——需要换到带显示的环境，或接 VNC。
+| 平台 | 档位 | 说明 |
+| --- | --- | --- |
+| Linux + 装了 Xvfb | `headless="virtual"` | 自动包一层 Xvfb 虚拟显示，适配无图形界面的服务器/容器 |
+| Windows / macOS | `headless=False` | 桌面本来就是真显示器，会弹出真实浏览器窗口 |
+| Linux 无 Xvfb | `headless=True` | 兜底，能跑但指纹弱一档，更容易被 Cloudflare 拦 |
+
+前两档都比真 headless 更能扛住 Cloudflare 挑战。`virtual` 这一档**只有 Linux 能用**
+——它本质是 X11 的虚拟帧缓冲，而 Windows 上的 `camoufox.exe` 是原生 Win32 构建，
+不走 X11，装 Xvfb 也没用。运行前都需要跑过一次 `uv run camoufox fetch` 下载浏览器二进制。
+
+**虚拟显示下你看不到浏览器实时画面。** 这条只对 Linux 的 `virtual`/`headless` 档成立；
+Windows/macOS 上有真窗口，能直接看到页面。关键步骤在所有平台都会截图到 `output/`。
+默认的魔术链接路径全程无需人工实时交互，不受影响；但如果走到验证码那条路弹出了
+hCaptcha 拖拽题，在没有图形界面的机器上就没法手动拖拽——需要换到带显示的环境，或接 VNC。
 
 **Cloudflare。** claude.ai 前面有 Cloudflare 挑战，实测等待时长在 30 秒到 120 秒以上之间波动，有时会直接超时，偶尔放行后还会返回一个完全空白、没有任何输入框的页面。这不是脚本的问题，重试或换个时间即可。超时会自动截图到 `output/waiting_login.png`。
 
@@ -108,4 +117,4 @@ uv run pytest tests/ -v
 
 62 个测试，约 1 秒跑完。覆盖：登录链接提取与收件人校验、验证码轮询与退避、`since` 时序不变量、后缀选择、环境变量解析。
 
-浏览器层（`browser.py`）没有单测——给 Playwright 页面交互写 mock 成本高、价值低。实际跑通验证过的只到：建邮箱、从真实邮件里提取登录链接并比对收件人、在登录页填入邮箱这一步。再往后的页面交互——`wait_code_screen`、`fill_code`、`open_magic_link`、`hcaptcha_visible`——目前一次完整流程都没跑通过：claude.ai 这边已经连续卡了几个小时的 Cloudflare 挑战或空白页，没能撑到魔术链接真正打开的那一步。这部分现在只有单测和抓取到的 DOM 快照兜底，不代表代码有问题，只是还没有实跑验证。
+浏览器层（`browser.py`）的页面交互以真实 DOM/截图为据，配有轻量假页面单测（见 `tests/test_onboarding.py`）。已实跑验证到：建邮箱 → 填登录邮箱 → 收魔术链接 → `open_magic_link` 打开后落到 `claude.ai/onboarding` 建号页。后续 `finish_after_auth` 会勾选服务条款并点 Create account；建号后若还有名字输入会尝试填默认值。验证码路径上的 hCaptcha 仍只检测不绕过，需人工拖拽。

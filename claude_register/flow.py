@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from claude_register.anymail import AnyMailClient, Mailbox, load_dotenv
+from claude_register.accounts import AccountRecord, save_account_record
 from claude_register.browser import (
+    _output_dir,
     browser_session,
+    default_display_name,
     fill_code,
     fill_email,
+    finish_after_auth,
     hcaptcha_visible,
     new_page,
     open_login,
     open_magic_link,
-    pause_for_user,
     screenshot,
     validate_proxy,
     wait_code_screen,
+    wait_for_session_key,
     wait_login_form,
 )
 from typing import TYPE_CHECKING
@@ -59,7 +63,36 @@ def run_browser(
     auto_login: bool,
     code_timeout: float,
     proxy: str | None = None,
-) -> None:
+    password: str = "",
+) -> dict | None:
+    """跑浏览器登录/建号。成功拿到 sessionKey 时返回账号 dict，否则 None。"""
+    account: dict | None = None
+    display_name = default_display_name(mailbox.email)
+
+    def _capture(page) -> dict | None:
+        nonlocal account
+        session_key = wait_for_session_key(page, timeout_ms=30_000)
+        if not session_key:
+            log("未在 cookies 中找到 sessionKey，跳过账号保存。")
+            try:
+                screenshot(page, "session_key_missing.png")
+            except Exception:
+                pass
+            return None
+        record = AccountRecord(
+            email=mailbox.email,
+            password=password or "",
+            sessionKey=session_key,
+            proxy=proxy or "",
+            display_name=display_name,
+            mailbox_id=str(mailbox.id or ""),
+        )
+        paths = save_account_record(record, output_dir=_output_dir.get())
+        account = record.to_dict()
+        account["_paths"] = {k: str(v) for k, v in paths.items()}
+        banner(f"账号已保存：{mailbox.email}")
+        return account
+
     with browser_session(proxy=proxy) as browser:
         context, page = new_page(browser)
         try:
@@ -104,9 +137,12 @@ def run_browser(
                     if not auto_login:
                         log("--no-auto-login，请自己打开上面的链接。")
                     elif open_magic_link(page, link):
-                        page.wait_for_timeout(3_000)
-                        screenshot(page, "after_magic_link.png")
-                        log(f"当前地址：{page.url}")
+                        # 硬等 3 秒经常截到转圈页；改为等到 onboarding/主界面再继续。
+                        ok = finish_after_auth(page, display_name=display_name)
+                        if not ok:
+                            log("登录后未能自动完成建号，请查看浏览器当前页面。")
+                        # 注册收尾后（成功或已部分登录）都尝试导出 sessionKey
+                        _capture(page)
                     else:
                         log("打开链接失败，请手动复制上面的链接到浏览器。")
                 elif code:
@@ -126,7 +162,13 @@ def run_browser(
                             banner("需要人工拖拽 hCaptcha 验证")
                             log("提交验证码后弹出了 hCaptcha 拖拽题（Task 6 已知现象）。")
                             log("请在浏览器里手动完成拖拽，脚本不会自动绕过。")
-                        log(f"当前地址：{page.url}")
+                            log("完成拖拽后若停在建号页，请手动勾选条款并点 Create account。")
+                            log(f"当前地址：{page.url}")
+                        else:
+                            ok = finish_after_auth(page, display_name=display_name)
+                            if not ok:
+                                log("验证码登录后未能自动完成建号，请查看浏览器当前页面。")
+                            _capture(page)
                 else:
                     log("既没收到登录链接，也没收到验证码。")
                     screenshot(page, "no_mail.png")
@@ -138,11 +180,16 @@ def run_browser(
                 # 关掉，那样等于凭空浪费一个可能已经登录成功、无法再拿一次的凭证。
                 log(f"登录后续操作出错（{exc}），但凭证已经取出且无法重新获取，"
                     "浏览器会保持打开，请手动检查当前页面状态。")
+                try:
+                    if account is None:
+                        _capture(page)
+                except Exception:
+                    pass
 
-            pause_for_user()
         finally:
             context.close()
             # browser 的关闭交给 browser_session 的上下文退出，这里不重复关。
+    return account
 
 
 def run(
@@ -152,7 +199,8 @@ def run(
     auto_login: bool = True,
     code_timeout: float = 120.0,
     config: Config | None = None,
-) -> None:
+    password: str = "",
+) -> dict | None:
     load_dotenv()
     if email and domain:
         log("已指定 --email，忽略 --domain（邮箱已含后缀）。")
@@ -185,17 +233,25 @@ def run(
     )
     log(f"本次邮箱：{mailbox.email} (id={mailbox.id or 'new'})")
 
-    run_browser(
+    account = run_browser(
         client,
         mailbox,
         since,
         auto_login=auto_login,
         code_timeout=code_timeout,
         proxy=proxy,
+        password=password,
     )
 
     log("完成。")
     banner(f"邮箱：{mailbox.email}")
     if mailbox.id:
         log(f"邮箱 id：{mailbox.id}")
+    if account and account.get("sessionKey"):
+        sk = str(account["sessionKey"])
+        log(f"sessionKey：{sk[:16]}…（共 {len(sk)} 字符，已写入 accounts 文件）")
+    else:
+        log("未保存 sessionKey（登录/建号可能未完成）。")
     log("提示：邮箱默认 24 小时后被 AnyMail 清理，若要长期收信请调整有效期。")
+    # Claude 魔术链接注册无独立密码；password 字段默认空，仅作导出占位。
+    return account
