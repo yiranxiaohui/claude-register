@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -35,7 +36,9 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         body = await request.json()
         cfg = state.config()
         password = body.get("password", "")
-        if password != cfg.panel_password:
+        # 常量时间比较，避免密码校验的时序侧信道。空密码（首次配置）保持旧行为：
+        # compare_digest("", "") 为真即放行。
+        if not hmac.compare_digest(password, cfg.panel_password):
             raise HTTPException(status_code=401, detail="密码错误")
         token = auth.make_token(cfg.panel_password, state.secret)
         response.set_cookie(auth.COOKIE_NAME, token, httponly=True, samesite="lax")
@@ -91,18 +94,24 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             raise HTTPException(status_code=404)
 
         async def gen():
-            out = Path(row["output_dir"]) if row["output_dir"] else None
-            lp = out / "log.txt" if out else None
-            if lp and lp.exists():
-                for line in lp.read_text(encoding="utf-8").splitlines():
-                    yield {"event": "log", "data": line}
-
+            # 注意：Runner.subscribe 对同一 active run 返回同一个 queue.Queue，
+            # 多个并发 SSE 观察者会各自 get() 到不同的行（行被瓜分）。这是单管理员
+            # 工具可接受的已知限制——GET /api/runs/{id} 详情始终返回完整 log.txt，
+            # 不丢数据，仅重连后的实时 tail 可能不完整。不做 pub/sub 重构。
             q = state.runner.subscribe(run_id)
             if q is None:
+                # 已结束的 run：从文件补发完整历史，再发 done（用最新 DB 状态）。
+                out = Path(row["output_dir"]) if row["output_dir"] else None
+                lp = out / "log.txt" if out else None
+                if lp and lp.exists():
+                    for line in lp.read_text(encoding="utf-8").splitlines():
+                        yield {"event": "log", "data": line}
                 fresh = db.get_run(state.conn, run_id)
                 yield {"event": "done", "data": fresh["status"] if fresh else row["status"]}
                 return
 
+            # 活动 run：队列自 run 启动起累积了全部历史行，直接读队列即可，
+            # 不能再补发 log.txt，否则每行重复。
             loop = asyncio.get_event_loop()
             while True:
                 if await request.is_disconnected():
