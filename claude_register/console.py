@@ -17,6 +17,22 @@ def reset_sink(token: contextvars.Token) -> None:
     _sink.reset(token)
 
 
+def current_sink() -> Callable[[str], None]:
+    """把当前的 sink 取成一个普通可调用对象。
+
+    给要在别的线程里打日志的代码用：sink 存在 ContextVar 里，新线程起来时
+    上下文是空的，直接调 log() 只会打到 stdout。在起线程之前先 current_sink()
+    抓一份，线程里用它就行。
+
+    比 contextvars.copy_context() 稳：Context 不可重入，多个线程同时 run
+    同一个 Context 会抛 "is already entered"。
+    """
+    sink = _sink.get()
+    if sink is not None:
+        return sink
+    return lambda msg: print(msg, flush=True)
+
+
 def log(msg: str) -> None:
     sink = _sink.get()
     if sink is not None:

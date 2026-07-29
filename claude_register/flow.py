@@ -11,9 +11,9 @@ from claude_register.browser import (
     new_page,
     open_login,
     open_magic_link,
-    parse_proxy,
     pause_for_user,
     screenshot,
+    validate_proxy,
     wait_code_screen,
     wait_login_form,
 )
@@ -175,8 +175,10 @@ def run(
         expires_hours = None
         proxy = None
 
-    # 代理格式校验放在建邮箱之前：非法代理应尽早失败，别浪费一个刚建好的 AnyMail 邮箱。
-    parse_proxy(proxy)
+    # 代理校验放在建邮箱之前：非法代理应尽早失败，别浪费一个刚建好的 AnyMail 邮箱。
+    # 不能只查 URL 格式——带认证的 socks5 还要经中继，中继构造时才会发现凭据超长
+    # 之类的问题，那时邮箱已经建出来了。这里把两层校验都跑一遍。
+    validate_proxy(proxy)
 
     mailbox, since = prepare_mailbox(
         client, email=email, domain=domain, expires_hours=expires_hours

@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlsplit
 from camoufox.sync_api import Camoufox
 from playwright.sync_api import Page, expect
 
-from claude_register.console import log, prompt
+from claude_register.console import current_sink, log, prompt
 from claude_register.socks_relay import SocksRelay
 
 URL = "https://claude.ai/login"
@@ -32,6 +32,22 @@ def set_output_dir(path) -> contextvars.Token:
     return _output_dir.set(Path(path))
 
 
+def mask_proxy(url: str) -> str:
+    """把代理 URL 里的密码换成 ***，供报错/日志使用。
+
+    这些字符串会被 runner 写进 output/runs/<id>/log.txt，而那个文件网页端可读。
+    配置里的代理密码不该因为一次填错就落进日志。解析不出结构时整串打码——
+    宁可信息少一点，也别把凭据漏出去。
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "***"
+    if not parts.password:
+        return url
+    return url.replace(f":{parts.password}@", ":***@", 1)
+
+
 def parse_proxy(url: str | None) -> dict | None:
     """把代理 URL 解析成 Playwright 风格 proxy dict。
 
@@ -41,8 +57,9 @@ def parse_proxy(url: str | None) -> dict | None:
     text = (url or "").strip()
     if not text:
         return None
+    safe = mask_proxy(text)
     hint = (
-        f"代理地址格式不对：{text!r}。应形如 "
+        f"代理地址格式不对：{safe!r}。应形如 "
         "http://host:port、http://user:pass@host:port 或 socks5://host:port"
     )
     try:
@@ -56,10 +73,14 @@ def parse_proxy(url: str | None) -> dict | None:
     scheme = _SCHEME_ALIASES.get(scheme, scheme)
     if scheme not in _PLAYWRIGHT_SCHEMES:
         raise ValueError(
-            f"不支持的代理协议 {parts.scheme!r}（来自 {text!r}）。"
+            f"不支持的代理协议 {parts.scheme!r}（来自 {safe!r}）。"
             f"浏览器只支持：{'、'.join(sorted(_PLAYWRIGHT_SCHEMES))}。"
         )
     proxy: dict = {"server": f"{scheme}://{parts.hostname}:{port}"}
+    if scheme == "socks4" and (parts.username or parts.password):
+        # SOCKS4 协议里没有用户名密码认证，Playwright 会把凭据默默丢掉。
+        # 静默降级 = 用户以为在认证、实际裸连，还不如当场报错。
+        raise ValueError(f"SOCKS4 不支持用户名密码认证，请改用 socks5（来自 {safe!r}）")
     if parts.username:
         proxy["username"] = unquote(parts.username)
     if parts.password:
@@ -90,6 +111,39 @@ def needs_relay(proxy_cfg: dict | None) -> bool:
     return bool(proxy_cfg.get("username") or proxy_cfg.get("password"))
 
 
+def normalize_proxy_url(url: str | None) -> str | None:
+    """把代理 URL 归一化成中继能直接用的形式（去空白、scheme 别名折叠）。
+
+    中继必须拿归一化后的串：直接用配置原文的话，`  socks5h://…  ` 这种写法在
+    parse_proxy 和中继两边解析结果不一致，出问题极难排查。
+    """
+    text = (url or "").strip()
+    if not text:
+        return None
+    parts = urlsplit(text)
+    scheme = _SCHEME_ALIASES.get(parts.scheme.lower(), parts.scheme.lower())
+    auth = ""
+    if parts.username:
+        auth = parts.username
+        if parts.password:
+            auth += f":{parts.password}"
+        auth += "@"
+    return f"{scheme}://{auth}{parts.hostname}:{parts.port}"
+
+
+def validate_proxy(url: str | None) -> dict | None:
+    """完整校验代理配置，返回 parse_proxy 的结果。
+
+    比 parse_proxy 多一步：带认证的 socks5 要经本地中继，中继对凭据长度等还有
+    自己的约束。调用方（flow.run）需要在建邮箱之前就知道这个代理到底能不能用，
+    否则等到启动浏览器才发现，已经白建了一个 AnyMail 邮箱。
+    """
+    cfg = parse_proxy(url)
+    if needs_relay(cfg):
+        SocksRelay(normalize_proxy_url(url))  # 只构造不 start()，触发凭据校验
+    return cfg
+
+
 @contextmanager
 def browser_session(proxy: str | None = None):
     """启动 Camoufox（Firefox 系隐身浏览器）会话。
@@ -111,7 +165,30 @@ def browser_session(proxy: str | None = None):
     geoip: str | bool = True
     if proxy_cfg is not None:
         if needs_relay(proxy_cfg):
-            relay = SocksRelay(proxy, on_error=lambda msg: log(f"代理中继：{msg}")).start()
+            # on_error 是在中继自己的线程里回调的，而 console 的 sink 是 ContextVar
+            # ——新线程起来时上下文是空的，日志会直接打到 stdout，网页端的 log.txt
+            # 里什么都看不到。这里在当前上下文里把 sink 取出来，回调时直接用。
+            #
+            # 不用 contextvars.copy_context()：Context 不可重入，两个 handler 线程
+            # 同时报错时后来的那个会撞上 "is already entered"，日志反而丢得更多——
+            # 而并发报错恰恰是撞上游限额时的常态。
+            relay_sink = current_sink()
+
+            def _relay_log(msg: str) -> None:
+                relay_sink(f"代理中继：{msg}")
+
+            # 中继起不来是代理的问题，得当场说清楚。漏到下面那个 Camoufox 兜底
+            # 里会变成「请先运行 camoufox fetch」，把人往完全无关的方向带。
+            try:
+                relay = SocksRelay(
+                    normalize_proxy_url(proxy),
+                    on_error=_relay_log,
+                ).start()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"启动本地代理中继失败（{exc}）。请检查代理地址 "
+                    f"{proxy_cfg['server']} 是否可达。"
+                ) from exc
             kwargs["proxy"] = {"server": relay.local_url}
             log(f"使用代理：{proxy_cfg['server']}（带认证，经本地中继 {relay.local_url}）")
             exit_ip = relay.exit_ip()

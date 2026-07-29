@@ -38,8 +38,9 @@ REP_CMD_NOT_SUPPORTED = 0x07
 REP_ATYP_NOT_SUPPORTED = 0x08
 
 # 上游握手（连接 + 认证 + CONNECT）的超时。握手阶段卡住说明上游有问题，
-# 早点失败好过让浏览器空等到它自己的导航超时。
-HANDSHAKE_TIMEOUT = 20.0
+# 早点失败好过让浏览器空等到它自己的导航超时。取值比 RETRY_DEADLINE 小，
+# 这样单次卡死也不会吃掉整个重试预算。
+HANDSHAKE_TIMEOUT = 8.0
 PIPE_BUFFER = 65536
 
 # 查出口 IP 用的站点。走中继查（域名交给上游解析），因为本地 DNS 可能被
@@ -52,8 +53,16 @@ EXIT_IP_TIMEOUT = 12.0
 # EOF 掉。但槽位随着旧连接关闭很快释放，短暂重试就能过——一次失败就放弃会在
 # 注册流程中途白掉请求。只对「握手阶段就被拒」重试，CONNECT 已经被上游明确
 # 拒绝（rep != 0）说明是目标本身的问题，重试没有意义。
+#
+# 重试总耗时必须远小于 page.goto 的 60s 导航超时：否则上游 hang 住时浏览器先超时，
+# 用户看到的仍是 NS_ERROR_NET_TIMEOUT，而真正有用的报错还没来得及冒出来。
+# 撞并发限额的 EOF 是毫秒级返回的，不需要大预算；真的连不上就该早点认输。
 CONNECT_RETRIES = 4
 RETRY_BACKOFF = 0.4
+RETRY_DEADLINE = 12.0
+
+# SOCKS5 认证子协商里用户名/密码都是单字节长度前缀，最长 255。
+MAX_CREDENTIAL_LEN = 255
 
 
 def _looks_like_ipv4(text: str) -> bool:
@@ -99,6 +108,9 @@ def _connect_upstream_once(cfg: dict, host: str, port: int) -> socket.socket:
     """
     try:
         up = socket.create_connection((cfg["host"], cfg["port"]), HANDSHAKE_TIMEOUT)
+    except TimeoutError as exc:
+        # 连不上且是「卡住」而非「拒绝」——重试只会把导航超时耗光。
+        raise UpstreamError(f"连上游代理超时：{exc}", REP_HOST_UNREACHABLE) from exc
     except OSError as exc:
         raise UpstreamError(
             f"连不上上游代理：{exc}", REP_HOST_UNREACHABLE, retryable=True
@@ -143,9 +155,14 @@ def _connect_upstream_once(cfg: dict, host: str, port: int) -> socket.socket:
     except UpstreamError:
         up.close()
         raise
+    except TimeoutError as exc:
+        up.close()
+        # 握手途中卡住 ≠ 撞并发限额（后者是毫秒级 EOF）。重试只会成倍消耗
+        # 导航超时预算，如实报错更有用。
+        raise UpstreamError(f"上游握手超时：{exc}") from exc
     except (OSError, ConnectionError) as exc:
         up.close()
-        # 握手途中被 EOF / 超时——典型的撞并发限额表现，值得重试。
+        # 握手途中被 EOF——典型的撞并发限额表现，值得重试。
         raise UpstreamError(f"上游握手失败：{exc}", retryable=True) from exc
 
     up.settimeout(None)
@@ -154,7 +171,13 @@ def _connect_upstream_once(cfg: dict, host: str, port: int) -> socket.socket:
 
 def _connect_upstream(cfg: dict, host: str, port: int) -> socket.socket:
     """带重试的上游连接。只重试握手阶段的失败（多半是并发限额），
-    上游明确拒绝的目标不重试。"""
+    上游明确拒绝的目标不重试。
+
+    重试受 RETRY_DEADLINE 墙钟约束：撞并发限额的 EOF 是毫秒级返回的，
+    真正吃时间的是上游 hang 住——那种情况多试几次也没用，只会把浏览器的
+    导航超时耗光，让用户看到没信息量的 NS_ERROR_NET_TIMEOUT。
+    """
+    deadline = time.monotonic() + RETRY_DEADLINE
     last: UpstreamError | None = None
     for attempt in range(CONNECT_RETRIES):
         try:
@@ -163,9 +186,14 @@ def _connect_upstream(cfg: dict, host: str, port: int) -> socket.socket:
             last = exc
             if not exc.retryable:
                 raise
-            if attempt < CONNECT_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF * (attempt + 1))
-    assert last is not None
+            if attempt == CONNECT_RETRIES - 1:
+                break
+            backoff = RETRY_BACKOFF * (attempt + 1)
+            if time.monotonic() + backoff >= deadline:
+                break
+            time.sleep(backoff)
+    if last is None:  # pragma: no cover - 循环至少跑一轮，必有 last
+        raise UpstreamError("上游连接失败")
     raise last
 
 
@@ -191,6 +219,8 @@ class _Handler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         client = self.request
         upstream: socket.socket | None = None
+        replied = False  # CONNECT 回过之后就进数据流了，不能再往里塞协议字节
+        self.server.track(client)
         try:
             client.settimeout(HANDSHAKE_TIMEOUT)
             ver, nmethods = _recv_exactly(client, 2)
@@ -205,7 +235,16 @@ class _Handler(socketserver.BaseRequestHandler):
             if atyp == ATYP_IPV4:
                 host = socket.inet_ntoa(_recv_exactly(client, 4))
             elif atyp == ATYP_DOMAIN:
-                host = _recv_exactly(client, _recv_exactly(client, 1)[0]).decode()
+                raw = _recv_exactly(client, _recv_exactly(client, 1)[0])
+                try:
+                    # RFC 1928 的域名字段是 ASCII（非 ASCII 域名走 punycode）。
+                    # 解不出来就明确回错误码——绝不能让 UnicodeDecodeError 把
+                    # handler 打死，那样客户端一个字节都收不到，只能挂到导航
+                    # 超时，正是这次要修的症状。
+                    host = raw.decode("ascii")
+                except UnicodeDecodeError:
+                    self._reply(client, REP_HOST_UNREACHABLE)
+                    return
             elif atyp == ATYP_IPV6:
                 host = socket.inet_ntop(socket.AF_INET6, _recv_exactly(client, 16))
             else:
@@ -228,7 +267,11 @@ class _Handler(socketserver.BaseRequestHandler):
                 return
 
             self._reply(client, REP_SUCCESS)
+            replied = True
             client.settimeout(None)
+            # 上游侧也要登记：反向 _pipe 阻塞在 upstream.recv 上，只掐客户端
+            # 那一头的话 back.join() 仍会卡住，整个 handler 还是活的。
+            self.server.track(upstream)
 
             # 双向转发。一个方向放到后台线程，另一个方向留在当前线程，
             # 这样 handle() 返回时隧道确实结束了（socketserver 会跟着关连接）。
@@ -238,8 +281,19 @@ class _Handler(socketserver.BaseRequestHandler):
             back.join()
         except (OSError, ConnectionError):
             pass
+        except Exception as exc:
+            # 兜底：任何没预料到的异常都要先回一个错误码再退场。静默断开会让
+            # 浏览器一路挂到导航超时，报出来的还是没信息量的 NS_ERROR_NET_TIMEOUT。
+            if not self.server.quiet.is_set():
+                self.server.on_error(f"中继内部错误：{exc!r}")
+            if not replied:
+                # 已经回过 CONNECT 成功的话，这条连接上跑的是应用数据，
+                # 再补一个 SOCKS 回复就是往数据流里掺垃圾。
+                self._reply(client, REP_GENERAL_FAILURE)
         finally:
+            self.server.untrack(client)
             if upstream is not None:
+                self.server.untrack(upstream)
                 try:
                     upstream.close()
                 except OSError:
@@ -254,8 +308,52 @@ class _Handler(socketserver.BaseRequestHandler):
 
 
 class _Server(socketserver.ThreadingTCPServer):
+    # daemon_threads=True 会让 ThreadingMixIn 干脆不跟踪线程，于是 server_close()
+    # 里那次 join 是空操作——已经建好的隧道会活过 stop()，带着上游的认证连接
+    # 继续占着并发槽位。serve.py 是长期进程，这种残留会一路把上游吃满。
+    # 所以自己记一份在跑的连接，stop() 时挨个掐断。
     daemon_threads = True
     allow_reuse_address = True
+    # 默认 5 太小：Firefox 加载一个页面会并行开十几条连接，backlog 满了之后
+    # 新连接会被内核直接拒（或干脆丢弃等重传），表现就是页面偶发加载不全。
+    request_queue_size = 128
+
+    def __init__(self, *args, **kwargs):
+        self._live: set[socket.socket] = set()
+        self._live_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
+
+    def track(self, sock: socket.socket) -> None:
+        with self._live_lock:
+            self._live.add(sock)
+
+    def untrack(self, sock: socket.socket) -> None:
+        with self._live_lock:
+            self._live.discard(sock)
+
+    def close_live(self) -> None:
+        """掐断所有在跑的隧道。
+
+        先 shutdown 后 close，两步都要：POSIX 上 shutdown(SHUT_RDWR) 就能唤醒
+        阻塞在 recv 的 _pipe；Windows 上实测 shutdown 唤不醒（recv 一直挂着），
+        必须 close 才会抛 ConnectionAbortedError。
+
+        顺序不能反：先 shutdown 让读线程醒过来退出，再 close 收 fd，避免
+        「另一个线程还阻塞在这个 fd 上」的窗口。close 走的是 Python socket
+        对象，重复 close 是幂等的，handler 的 finally 再关一次没有副作用。
+        """
+        with self._live_lock:
+            live = list(self._live)
+        for sock in live:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        for sock in live:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 class SocksRelay:
@@ -280,13 +378,24 @@ class SocksRelay:
     def _parse_upstream(url: str) -> dict:
         parts = urlsplit(url)
         if not parts.hostname or parts.port is None:
-            raise ValueError(f"上游代理地址不完整：{url!r}")
-        return {
+            # 不要把 url 原样带进消息——里面有凭据，而这条报错会落进
+            # 网页可读的 log.txt。
+            raise ValueError("上游代理地址不完整：缺少主机或端口")
+        cfg = {
             "host": parts.hostname,
             "port": parts.port,
             "username": unquote(parts.username or ""),
             "password": unquote(parts.password or ""),
         }
+        for field, label in (("username", "用户名"), ("password", "密码")):
+            n = len(cfg[field].encode())
+            if n > MAX_CREDENTIAL_LEN:
+                # SOCKS5 认证子协商是单字节长度前缀。放过去的话运行时
+                # bytes([n]) 会抛 ValueError 把 handler 打死，客户端只能挂到超时。
+                raise ValueError(
+                    f"代理{label}过长（{n} 字节），SOCKS5 最多 {MAX_CREDENTIAL_LEN} 字节"
+                )
+        return cfg
 
     @property
     def local_url(self) -> str:
@@ -333,6 +442,9 @@ class SocksRelay:
 
     def _fetch_ip(self, host: str) -> str | None:
         s = socket.create_connection((self.host, self.port), EXIT_IP_TIMEOUT)
+        # ssl.wrap_socket 会把 s detach 掉（s.fileno() 变 -1），之后关 s 是空操作，
+        # 真正持有 fd 的是包装后那个对象。所以记下它，在 finally 里关它。
+        conn: socket.socket | None = None
         try:
             s.settimeout(EXIT_IP_TIMEOUT)
             s.sendall(bytes([SOCKS_VERSION, 0x01, AUTH_NONE]))
@@ -371,10 +483,13 @@ class SocksRelay:
                 return None
             return body.strip().decode(errors="ignore").splitlines()[-1].strip()
         finally:
-            try:
-                s.close()
-            except OSError:
-                pass
+            for sock in (conn, s):
+                if sock is None:
+                    continue
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     # 这两个是接缝，测试里替换掉即可用明文假上游验证 SOCKS 协议路径本身，
     # 不必为了跑测试去签一套自签证书。
@@ -388,7 +503,8 @@ class SocksRelay:
 
     def stop(self) -> None:
         if self._server is not None:
-            self._server.shutdown()
+            self._server.shutdown()  # 停 accept 循环
+            self._server.close_live()  # 掐断已建立的隧道，否则它们会活过 stop()
             self._server.server_close()
             self._server = None
         if self._thread is not None:

@@ -260,6 +260,96 @@ def test_exit_ip_returns_none_when_unavailable(upstream, monkeypatch):
         assert relay.exit_ip() is None
 
 
+def test_stop_terminates_live_tunnels(upstream):
+    """stop() 必须掐断已建立的隧道。
+
+    daemon_threads=True 时 ThreadingMixIn 根本不跟踪线程，server_close 的 join
+    是空操作，shutdown 也只停 accept 循环——已建立的隧道会带着上游的认证连接
+    活下去。serve.py 是长期运行的进程，这种残留会一路吃满上游的并发限额。
+    """
+    with SocksRelay(f"socks5://alice:s3cret@127.0.0.1:{upstream.port}") as relay:
+        s = socks5_noauth_connect(relay.port, "example.com", 443)
+    # 退出 with 之后隧道必须已经断开
+    s.settimeout(5)
+    try:
+        s.sendall(b"PING")
+        leftover = s.recv(100)
+    except OSError:
+        leftover = b""
+    assert leftover == b"", f"stop() 后隧道仍然活着，收到 {leftover!r}"
+    s.close()
+
+
+def test_malformed_domain_gets_error_reply_not_silence(upstream):
+    """畸形域名必须收到 SOCKS 错误码。
+
+    静默断开会让浏览器一路挂到导航超时——正是这次要修的那个症状。
+    """
+    with SocksRelay(f"socks5://alice:s3cret@127.0.0.1:{upstream.port}") as relay:
+        s = socket.create_connection(("127.0.0.1", relay.port), 5)
+        s.settimeout(8)
+        s.sendall(bytes([0x05, 0x01, NO_AUTH]))
+        assert s.recv(2) == bytes([0x05, NO_AUTH])
+        bad = b"\xff\xfe\xfd"  # 非 UTF-8
+        s.sendall(b"\x05\x01\x00\x03" + bytes([len(bad)]) + bad + struct.pack("!H", 443))
+        rep = s.recv(10)
+        assert rep, "必须回错误码，不能静默断开让客户端挂到超时"
+        assert rep[1] != 0x00
+        s.close()
+
+
+def test_oversized_credentials_rejected_at_construction():
+    """SOCKS5 的用户名/密码字段是单字节长度前缀，超 255 字节没法编码。
+    构造时就报清楚，别等到运行中 bytes([300]) 抛 ValueError 把 handler 打死。"""
+    with pytest.raises(ValueError, match="255"):
+        SocksRelay("socks5://" + "u" * 300 + ":p@h:1080")
+
+
+def test_retry_budget_stays_under_navigation_timeout():
+    """重试总耗时必须显著小于 page.goto 的 60s 导航超时。
+
+    否则上游 hang 住时，浏览器会先一步超时——用户看到的仍是
+    NS_ERROR_NET_TIMEOUT，而真正有用的中继报错要等更久才出现。
+    """
+    from claude_register import socks_relay as sr
+
+    assert sr.RETRY_DEADLINE < 30.0, "重试预算必须远小于 60s 导航超时"
+
+
+def test_exit_ip_does_not_leak_sockets(monkeypatch):
+    """探测出口 IP 不能漏 socket。
+
+    ssl.wrap_socket 会把原 socket detach 掉（原对象 fileno 变成 -1），于是
+    finally 里的 s.close() 成了空操作，TLS 那层的 fd 没人关。serve.py 是长期
+    进程，每次注册漏几个，迟早 fd 用光。
+    """
+    up = IpEchoUpstream("203.0.113.9")
+    wrapped = []
+
+    def fake_wrap(sock, host):
+        # 模仿 ssl.wrap_socket 的关键副作用：把原 socket detach 掉，
+        # 原对象的 fileno 变成 -1，对它 close() 从此不起作用。
+        # 超时要跟着搬过去——Python 的超时是靠非阻塞 fd 实现的，
+        # 光 detach 会让新对象以为自己是阻塞模式，recv 直接抛 BlockingIOError。
+        timeout = sock.gettimeout()
+        clone = socket.socket(fileno=sock.detach())
+        clone.settimeout(timeout)
+        wrapped.append(clone)
+        return clone
+
+    monkeypatch.setattr(SocksRelay, "_wrap_tls", staticmethod(fake_wrap))
+    monkeypatch.setattr(SocksRelay, "_exit_ip_port", 80)
+    try:
+        with SocksRelay(f"socks5://alice:s3cret@127.0.0.1:{up.port}") as relay:
+            assert relay.exit_ip() == "203.0.113.9"
+    finally:
+        up.close()
+
+    assert wrapped, "应该走到 TLS 包装这一步"
+    for sock in wrapped:
+        assert sock.fileno() == -1, "包装后的 socket 必须被关掉，否则 fd 泄漏"
+
+
 def test_exit_ip_probe_failures_are_not_reported_as_errors(upstream, monkeypatch):
     """查出口 IP 时挨个试若干站点，前面的失败是正常降级，不该走 on_error——
     否则用户会在日志里看到一串吓人的『上游握手失败』，其实一切正常。"""
