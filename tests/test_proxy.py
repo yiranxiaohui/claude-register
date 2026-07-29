@@ -1,4 +1,5 @@
 import inspect
+import types
 
 import pytest
 
@@ -52,3 +53,30 @@ def test_browser_session_accepts_proxy():
 def test_run_browser_accepts_proxy():
     sig = inspect.signature(flow.run_browser)
     assert "proxy" in sig.parameters
+
+
+def test_browser_session_invalid_proxy_raises_before_launch():
+    with pytest.raises(ValueError):
+        with browser.browser_session(proxy="not-a-proxy"):
+            pass
+
+
+def test_run_fails_fast_on_invalid_proxy_before_mailbox(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError("prepare_mailbox 不应该在代理校验失败前被调用")
+
+    monkeypatch.setattr(flow, "prepare_mailbox", _boom)
+
+    config = types.SimpleNamespace(
+        anymail_base_url="",
+        anymail_api_key="",
+        anymail_domain="",
+        register_code_regex="",
+        anymail_expires_hours=0,
+        register_login_timeout=120.0,
+        register_auto_login=True,
+        register_proxy="not-a-proxy",
+    )
+
+    with pytest.raises(ValueError):
+        flow.run(config=config)

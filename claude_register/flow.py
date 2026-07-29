@@ -11,6 +11,7 @@ from claude_register.browser import (
     new_page,
     open_login,
     open_magic_link,
+    parse_proxy,
     pause_for_user,
     screenshot,
     wait_code_screen,
@@ -168,11 +169,14 @@ def run(
         )
         auto_login = config.register_auto_login
         code_timeout = config.register_login_timeout
-        proxy = getattr(config, "register_proxy", "") or None
+        proxy = config.register_proxy or None
     else:
         client = AnyMailClient(domain=domain)
         expires_hours = None
         proxy = None
+
+    # 代理格式校验放在建邮箱之前：非法代理应尽早失败，别浪费一个刚建好的 AnyMail 邮箱。
+    parse_proxy(proxy)
 
     mailbox, since = prepare_mailbox(
         client, email=email, domain=domain, expires_hours=expires_hours
