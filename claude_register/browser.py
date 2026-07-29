@@ -61,18 +61,25 @@ def screenshot(page: Page, name: str) -> Path:
 
 
 @contextmanager
-def browser_session():
+def browser_session(proxy: str | None = None):
     """启动 Camoufox（Firefox 系隐身浏览器）会话。
 
     headless="virtual" 自动包 Xvfb，适配无显示的容器，且比真 headless 更抗
-    Cloudflare 检测；humanize 提供人性化光标移动；locale/geoip 让指纹统一。
+    Cloudflare 检测；humanize 提供人性化光标移动；locale/geoip 让指纹统一
+    （配了代理时 geoip 按代理出口 IP 匹配时区/地理指纹）。
     """
+    proxy_cfg = parse_proxy(proxy)
+    kwargs: dict = {}
+    if proxy_cfg is not None:
+        kwargs["proxy"] = proxy_cfg
+        log(f"使用代理：{proxy_cfg['server']}")
     cm = Camoufox(
         headless="virtual",
         humanize=True,
         locale="en-US",
         geoip=True,
         window=(1280, 900),
+        **kwargs,
     )
     # 真正的启动发生在 __enter__（拉起 Firefox / Xvfb），构造函数不会抛——所以只包
     # __enter__ 才能拦到「没 fetch 二进制」「缺 Xvfb」这类启动失败，并给出可操作的提示。

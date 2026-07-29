@@ -57,8 +57,9 @@ def run_browser(
     *,
     auto_login: bool,
     code_timeout: float,
+    proxy: str | None = None,
 ) -> None:
-    with browser_session() as browser:
+    with browser_session(proxy=proxy) as browser:
         context, page = new_page(browser)
         try:
             open_login(page)
@@ -167,9 +168,11 @@ def run(
         )
         auto_login = config.register_auto_login
         code_timeout = config.register_login_timeout
+        proxy = getattr(config, "register_proxy", "") or None
     else:
         client = AnyMailClient(domain=domain)
         expires_hours = None
+        proxy = None
 
     mailbox, since = prepare_mailbox(
         client, email=email, domain=domain, expires_hours=expires_hours
@@ -182,6 +185,7 @@ def run(
         since,
         auto_login=auto_login,
         code_timeout=code_timeout,
+        proxy=proxy,
     )
 
     log("完成。")

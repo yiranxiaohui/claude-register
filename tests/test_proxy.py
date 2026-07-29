@@ -1,5 +1,8 @@
+import inspect
+
 import pytest
 
+from claude_register import browser, flow
 from claude_register.browser import parse_proxy
 
 
@@ -39,3 +42,13 @@ def test_auth_percent_decoded():
 def test_invalid_raises(bad):
     with pytest.raises(ValueError):
         parse_proxy(bad)
+
+
+def test_browser_session_accepts_proxy():
+    sig = inspect.signature(browser.browser_session)
+    assert "proxy" in sig.parameters
+
+
+def test_run_browser_accepts_proxy():
+    sig = inspect.signature(flow.run_browser)
+    assert "proxy" in sig.parameters
