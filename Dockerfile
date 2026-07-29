@@ -43,10 +43,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir uv
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+# 此时源码还没拷入，只装第三方依赖；项目本体（hatchling 构建需要 README.md/源码）留到下面装
+RUN uv sync --frozen --no-dev --no-install-project
 COPY claude_register/ ./claude_register/
 COPY server/ ./server/
-COPY serve.py main.py ./
+COPY serve.py main.py README.md ./
+RUN uv sync --frozen --no-dev
 COPY --from=web /web/dist ./web/dist
 RUN uv run camoufox fetch
 EXPOSE 8790
