@@ -82,3 +82,4 @@ class Runner:
             fh.close()
             with self._lock:
                 self._active_id = None
+                self._queues.pop(rid, None)  # 清理已完成 run 的队列句柄，避免无限累积

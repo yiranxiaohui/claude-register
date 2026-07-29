@@ -6,6 +6,7 @@ import hmac
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -23,12 +24,29 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     app = FastAPI()
     app.state.cr = state
 
+    def _has_valid_cookie(request: Request, cfg) -> bool:
+        token = request.cookies.get(auth.COOKIE_NAME, "")
+        return bool(auth.verify_token(token, cfg.panel_password, state.secret))
+
     def require_auth(request: Request):
+        """严格鉴权：数据/动作/工件路由用。
+
+        空密码（未配置）时一律 401——引导态下不暴露任何可触发/泄露的东西，
+        直到设好密码；不再 allow-all。
+        """
+        cfg = state.config()
+        if not cfg.panel_password or not _has_valid_cookie(request, cfg):
+            raise HTTPException(status_code=401, detail="未登录")
+
+    def require_auth_or_bootstrap(request: Request):
+        """宽松鉴权：仅配置读写路由用。
+
+        空密码时放行（好让首次配置能设密码）；一旦设了密码则要求有效 cookie。
+        """
         cfg = state.config()
         if not cfg.panel_password:
-            return  # 未设密码：放行（首次配置用）
-        token = request.cookies.get(auth.COOKIE_NAME, "")
-        if not auth.verify_token(token, cfg.panel_password, state.secret):
+            return  # 引导态：允许无鉴权读写配置以完成初始设置
+        if not _has_valid_cookie(request, cfg):
             raise HTTPException(status_code=401, detail="未登录")
 
     @app.post("/api/login")
@@ -45,11 +63,11 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/config")
-    def get_config(_=Depends(require_auth)):
+    def get_config(_=Depends(require_auth_or_bootstrap)):
         return to_redacted_dict(state.config())
 
     @app.put("/api/config")
-    async def put_config(request: Request, _=Depends(require_auth)):
+    async def put_config(request: Request, _=Depends(require_auth_or_bootstrap)):
         body = await request.json()
         cfg = save_config(state.config_path, body)
         return to_redacted_dict(cfg)
@@ -153,10 +171,19 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             raise HTTPException(status_code=409, detail="已有任务在运行")
         return {"run_id": rid}
 
-    # 截图/日志静态资源
+    # 截图/日志工件：必须鉴权 + 防路径穿越（不能用裸 StaticFiles，mount 不继承 Depends）
     runs_dir = state.data_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
-    app.mount("/runs", StaticFiles(directory=runs_dir), name="runs")
+
+    @app.get("/runs/{run_id}/{filename}")
+    def run_artifact(run_id: int, filename: str, _=Depends(require_auth)):
+        base = (state.data_dir / "runs" / str(run_id)).resolve()
+        target = (base / filename).resolve()
+        if base not in target.parents and target != base:
+            raise HTTPException(status_code=404)
+        if not target.is_file():
+            raise HTTPException(status_code=404)
+        return FileResponse(target)
 
     # 前端（dist 存在才挂，测试环境无 dist 不报错）
     if WEB_DIST.exists():

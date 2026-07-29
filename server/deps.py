@@ -1,6 +1,7 @@
 """应用级单例装配：DB 连接、Config 路径、Runner。"""
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +22,13 @@ class AppState:
         self.conn = db.init_db(self.data_dir / "claude-register.db")
         db.mark_stale_running_as_failed(self.conn)  # 重启清理残留 running
         self.runner = Runner(self.conn, self.data_dir, now_fn)
-        self.secret = "claude-register-panel"
+        # 首次启动生成随机会话密钥并持久化（data_dir 已 gitignore，不会被提交）。
+        secret_path = self.data_dir / "secret.key"
+        if secret_path.exists():
+            self.secret = secret_path.read_text(encoding="utf-8").strip()
+        else:
+            self.secret = secrets.token_hex(32)
+            secret_path.write_text(self.secret, encoding="utf-8")
 
     def config(self) -> Config:
         return load_config(self.config_path)

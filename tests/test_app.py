@@ -166,3 +166,53 @@ def test_stream_active_run_no_duplicate_over_http(tmp_path, monkeypatch):
     assert log_events.count("LINE_ONE") == 1, log_events
     assert log_events.count("LINE_TWO") == 1, log_events
     assert done_seen
+
+
+def test_runs_artifact_requires_auth(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    c = _client(tmp_path)
+    run_dir = tmp_path / "runs" / "7"
+    run_dir.mkdir(parents=True)
+    (run_dir / "log.txt").write_text("SECRET_MAGIC_LINK", encoding="utf-8")
+
+    # 无 cookie → 401，不泄露
+    r = c.get("/runs/7/log.txt")
+    assert r.status_code == 401
+    assert "SECRET_MAGIC_LINK" not in r.text
+
+    # 登录后 → 200 且返回内容
+    c.post("/api/login", json={"password": "pw"})
+    r2 = c.get("/runs/7/log.txt")
+    assert r2.status_code == 200
+    assert r2.text == "SECRET_MAGIC_LINK"
+
+
+def test_runs_artifact_path_traversal_blocked(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw", "anymail_api_key": "ak_secret"})
+    c = _client(tmp_path)
+    c.post("/api/login", json={"password": "pw"})
+    (tmp_path / "runs" / "1").mkdir(parents=True)
+
+    for evil in ("..%2f..%2fconfig.yaml", "../../config.yaml", "..%2fsecret.key"):
+        r = c.get(f"/runs/1/{evil}")
+        assert r.status_code == 404, evil
+        assert "ak_secret" not in r.text
+        assert "panel" not in r.text
+
+
+def test_bootstrap_empty_password_blocks_runs(tmp_path):
+    # 空密码引导态
+    c = _client(tmp_path)
+    # 配置可读（引导放行）
+    assert c.get("/api/config").status_code == 200
+    # 但数据/动作路由仍 401
+    assert c.get("/api/runs").status_code == 401
+    assert c.post("/api/runs", json={"email": "a@x.com"}).status_code == 401
+    assert c.get("/api/accounts").status_code == 401
+    (tmp_path / "runs" / "1").mkdir(parents=True)
+    (tmp_path / "runs" / "1" / "log.txt").write_text("x", encoding="utf-8")
+    assert c.get("/runs/1/log.txt").status_code == 401
+    # 通过 PUT 设置密码（引导放行）
+    assert c.put("/api/config", json={"panel_password": "newpw"}).status_code == 200
+    # 设好密码后无 cookie 再访问配置 → 401
+    assert c.get("/api/config").status_code == 401
