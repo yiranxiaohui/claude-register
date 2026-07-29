@@ -18,6 +18,7 @@ from claude_register.browser import (
 )
 from claude_register.console import banner, log
 from claude_register.mailbox import prepare_mailbox
+from server.config_store import Config
 
 # 验证码兜底轮询最多占用总预算（--login-timeout）的这一比例，且不超过下面的上限秒数——
 # 两者取较小值，剩下的预算都留给魔术链接轮询，这样 --login-timeout 才是「总等待时长」的
@@ -144,13 +145,31 @@ def run(
     domain: str | None = None,
     auto_login: bool = True,
     code_timeout: float = 120.0,
+    config: Config | None = None,
 ) -> None:
     load_dotenv()
     if email and domain:
         log("已指定 --email，忽略 --domain（邮箱已含后缀）。")
 
-    client = AnyMailClient(domain=domain)
-    mailbox, since = prepare_mailbox(client, email=email, domain=domain)
+    if config is not None:
+        client = AnyMailClient(
+            base_url=config.anymail_base_url or None,
+            api_key=config.anymail_api_key or None,
+            domain=config.anymail_domain or domain,
+            code_regex=config.register_code_regex or None,
+        )
+        expires_hours = (
+            None if config.anymail_expires_hours <= 0 else config.anymail_expires_hours
+        )
+        auto_login = config.register_auto_login
+        code_timeout = config.register_login_timeout
+    else:
+        client = AnyMailClient(domain=domain)
+        expires_hours = None
+
+    mailbox, since = prepare_mailbox(
+        client, email=email, domain=domain, expires_hours=expires_hours
+    )
     log(f"本次邮箱：{mailbox.email} (id={mailbox.id or 'new'})")
 
     run_browser(

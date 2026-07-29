@@ -125,6 +125,7 @@ class AnyMailClient:
         base_url: str | None = None,
         api_key: str | None = None,
         domain: str | None = None,
+        code_regex: str | None = None,
         timeout: float = 30.0,
     ) -> None:
         load_dotenv()
@@ -143,6 +144,7 @@ class AnyMailClient:
             or os.getenv("ANY_MAIL_DOMAIN")
             or ""
         ).strip().lstrip("@").strip(".").lower()
+        self.code_regex = (code_regex or "").strip()
         self.timeout = timeout
 
         if not self.base_url:
@@ -394,7 +396,11 @@ class AnyMailClient:
         两级匹配在单次响应内完成：先用服务端提取的 code，没有再用兜底正则
         匹配同一批邮件的正文——避免每轮翻倍请求。
         """
-        primary = code_regex or resolve_code_regex(os.getenv("ANYMAIL_CODE_REGEX"))
+        primary = (
+            code_regex
+            or self.code_regex
+            or resolve_code_regex(os.getenv("ANYMAIL_CODE_REGEX"))
+        )
         fallback = fallback_regex or FALLBACK_CODE_REGEX
         deadline = monotonic() + timeout
         backoff = 1.0

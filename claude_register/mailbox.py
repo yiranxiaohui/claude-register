@@ -54,9 +54,12 @@ def choose_suffix(
         log("输入无效，请重试。")
 
 
-def create_for_suffix(client: AnyMailClient, domain: str) -> Mailbox:
+def create_for_suffix(
+    client: AnyMailClient, domain: str, *, expires_hours: float | None = None
+) -> Mailbox:
     """按后缀建一个新邮箱，前缀随机（claude_<8位hex>）。"""
-    expires_hours = resolve_expires_hours(os.getenv("ANYMAIL_EXPIRES_HOURS"))
+    if expires_hours is None:
+        expires_hours = resolve_expires_hours(os.getenv("ANYMAIL_EXPIRES_HOURS"))
     box = client.create_mailbox(
         local_part=None,  # 交给 anymail 生成 claude_<8位hex>
         domain=domain,
@@ -71,6 +74,7 @@ def prepare_mailbox(
     *,
     email: str | None = None,
     domain: str | None = None,
+    expires_hours: float | None = None,
     prompt=console_prompt,
 ) -> tuple[Mailbox, str]:
     """返回 (mailbox, since)。
@@ -87,4 +91,4 @@ def prepare_mailbox(
         return box, since
 
     suffix = choose_suffix(client, domain, prompt=prompt)
-    return create_for_suffix(client, suffix), since
+    return create_for_suffix(client, suffix, expires_hours=expires_hours), since
