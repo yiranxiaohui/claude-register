@@ -12,9 +12,18 @@ from camoufox.sync_api import Camoufox
 from playwright.sync_api import Page, expect
 
 from claude_register.console import log, prompt
+from claude_register.socks_relay import SocksRelay
 
 URL = "https://claude.ai/login"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
+
+# Playwright 的 toJugglerProxyOptions 只认这四个 scheme；碰上不认识的会静默降级成
+# http 代理（`let type = "http"` 的默认分支），于是浏览器拿 HTTP CONNECT 去捅一个
+# 非 HTTP 端口，对端不回包 → NS_ERROR_NET_TIMEOUT。宁可在这里明确拒绝。
+_PLAYWRIGHT_SCHEMES = {"http", "https", "socks4", "socks5"}
+# socks5h 是 curl 的写法（h = 由代理做 DNS）。Playwright 走 SOCKS5 时本来就是远端
+# 解析，语义等价，归一化掉即可。
+_SCHEME_ALIASES = {"socks5h": "socks5", "socks4a": "socks4"}
 
 _output_dir: contextvars.ContextVar = contextvars.ContextVar("output_dir", default=OUTPUT_DIR)
 
@@ -26,8 +35,8 @@ def set_output_dir(path) -> contextvars.Token:
 def parse_proxy(url: str | None) -> dict | None:
     """把代理 URL 解析成 Playwright 风格 proxy dict。
 
-    空 → None（直连）。scheme/host/port 缺一 → ValueError（不静默降级直连，
-    避免用户以为走了代理实际在裸奔）。
+    空 → None（直连）。scheme/host/port 缺一、或 scheme 不是 Playwright 认识的那几个
+    → ValueError（不静默降级，避免用户以为走了代理实际在裸奔、或者卡在无解的超时里）。
     """
     text = (url or "").strip()
     if not text:
@@ -43,7 +52,14 @@ def parse_proxy(url: str | None) -> dict | None:
         raise ValueError(hint) from exc
     if not parts.scheme or not parts.hostname or port is None:
         raise ValueError(hint)
-    proxy: dict = {"server": f"{parts.scheme}://{parts.hostname}:{port}"}
+    scheme = parts.scheme.lower()
+    scheme = _SCHEME_ALIASES.get(scheme, scheme)
+    if scheme not in _PLAYWRIGHT_SCHEMES:
+        raise ValueError(
+            f"不支持的代理协议 {parts.scheme!r}（来自 {text!r}）。"
+            f"浏览器只支持：{'、'.join(sorted(_PLAYWRIGHT_SCHEMES))}。"
+        )
+    proxy: dict = {"server": f"{scheme}://{parts.hostname}:{port}"}
     if parts.username:
         proxy["username"] = unquote(parts.username)
     if parts.password:
@@ -60,6 +76,20 @@ def screenshot(page: Page, name: str) -> Path:
     return path
 
 
+def needs_relay(proxy_cfg: dict | None) -> bool:
+    """带凭据的 SOCKS5 需要本地中继。
+
+    Firefox 不支持 SOCKS5 用户名密码认证，playwright driver 里直接抛
+    "Browser does not support socks5 proxy authentication"。HTTP/HTTPS 代理的
+    认证是支持的，无凭据的 socks5 也没问题——那些不必多绕一层。
+    """
+    if not proxy_cfg:
+        return False
+    if not proxy_cfg["server"].startswith("socks5://"):
+        return False
+    return bool(proxy_cfg.get("username") or proxy_cfg.get("password"))
+
+
 @contextmanager
 def browser_session(proxy: str | None = None):
     """启动 Camoufox（Firefox 系隐身浏览器）会话。
@@ -67,17 +97,37 @@ def browser_session(proxy: str | None = None):
     headless="virtual" 自动包 Xvfb，适配无显示的容器，且比真 headless 更抗
     Cloudflare 检测；humanize 提供人性化光标移动；locale/geoip 让指纹统一
     （配了代理时 geoip 按代理出口 IP 匹配时区/地理指纹）。
+
+    带认证的 SOCKS5 会先在本地拉起一个免认证中继（见 socks_relay），
+    浏览器只连 127.0.0.1，凭据由中继负责递给上游。
     """
     proxy_cfg = parse_proxy(proxy)
+    relay = None
     kwargs: dict = {}
+    # geoip 让指纹（时区/地理）跟代理出口 IP 对齐。True 表示让 camoufox 自己去探测，
+    # 但它那次探测走本地 DNS——本地被 fake-ip 污染时（Clash 一类透明代理把域名解析成
+    # 198.18.x.x）会拿虚拟地址去 CONNECT，上游认不得直接关连接，启动就崩了。
+    # 所以只要中继能查到出口 IP，就直接把 IP 喂给它，跳过那次探测。
+    geoip: str | bool = True
     if proxy_cfg is not None:
-        kwargs["proxy"] = proxy_cfg
-        log(f"使用代理：{proxy_cfg['server']}")
+        if needs_relay(proxy_cfg):
+            relay = SocksRelay(proxy, on_error=lambda msg: log(f"代理中继：{msg}")).start()
+            kwargs["proxy"] = {"server": relay.local_url}
+            log(f"使用代理：{proxy_cfg['server']}（带认证，经本地中继 {relay.local_url}）")
+            exit_ip = relay.exit_ip()
+            if exit_ip:
+                geoip = exit_ip
+                log(f"代理出口 IP：{exit_ip}")
+            else:
+                log("查不到代理出口 IP，交给 camoufox 自行探测。")
+        else:
+            kwargs["proxy"] = proxy_cfg
+            log(f"使用代理：{proxy_cfg['server']}")
     cm = Camoufox(
         headless="virtual",
         humanize=True,
         locale="en-US",
-        geoip=True,
+        geoip=geoip,
         window=(1280, 900),
         **kwargs,
     )
@@ -87,6 +137,8 @@ def browser_session(proxy: str | None = None):
     try:
         browser = cm.__enter__()
     except Exception as exc:
+        if relay is not None:
+            relay.stop()
         raise RuntimeError(
             f"启动 Camoufox 失败（{exc}）。请先运行 `uv run camoufox fetch` "
             "下载浏览器二进制，并确认已安装 Xvfb。"
@@ -96,6 +148,8 @@ def browser_session(proxy: str | None = None):
         yield browser
     finally:
         cm.__exit__(None, None, None)
+        if relay is not None:
+            relay.stop()
 
 
 def new_page(browser):
