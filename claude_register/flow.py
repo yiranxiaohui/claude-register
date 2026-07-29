@@ -16,9 +16,13 @@ from claude_register.browser import (
     wait_code_screen,
     wait_login_form,
 )
+from typing import TYPE_CHECKING
+
 from claude_register.console import banner, log
 from claude_register.mailbox import prepare_mailbox
-from server.config_store import Config
+
+if TYPE_CHECKING:
+    from server.config_store import Config
 
 # 验证码兜底轮询最多占用总预算（--login-timeout）的这一比例，且不超过下面的上限秒数——
 # 两者取较小值，剩下的预算都留给魔术链接轮询，这样 --login-timeout 才是「总等待时长」的
