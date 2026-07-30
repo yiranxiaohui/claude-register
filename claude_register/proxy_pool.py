@@ -7,7 +7,6 @@ provision：随机挑一台节点 → 在该节点选空闲端口 → 建 mixed(
 
 from __future__ import annotations
 
-import secrets
 import string
 from collections.abc import Callable
 from dataclasses import dataclass

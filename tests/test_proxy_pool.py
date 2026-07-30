@@ -30,6 +30,7 @@ class FakeXui:
         return self.spec.get("inbounds", [])
 
     def create_socks_inbound(self, user, password, port, expiry_ms, remark):
+        self.spec.setdefault("attempts", []).append(port)
         if port in self.spec.get("taken", set()):
             raise XuiError("port already in use")
         self.created.append((user, password, port, expiry_ms, remark))
@@ -41,12 +42,24 @@ class FakeXui:
         self.spec.setdefault("deleted", []).append(inbound_id)
 
 
+class ScriptedRandom:
+    """确定性 rng：shuffle 保持原顺序，randint 依次弹出脚本端口，choice 取第一个。"""
+    def __init__(self, ports):
+        self._ports = list(ports)
+    def shuffle(self, seq):
+        pass  # 恒等：保留调用方给的节点顺序，便于断言 failover
+    def randint(self, lo, hi):
+        return self._ports.pop(0)
+    def choice(self, seq):
+        return seq[0]
+
+
 def _node(name, username):
     return XuiNode(name=name, base_url=f"https://{name}.test:2053", username=username,
                    password="pw", proxy_host=f"{name}.example.com")
 
 
-def _pool(nodes, specs, *, seed=0, now_ms=1_000):
+def _pool(nodes, specs, *, seed=0, now_ms=1_000, rng=None):
     FakeXui.registry = specs
     return ProxyPool(
         nodes,
@@ -54,7 +67,7 @@ def _pool(nodes, specs, *, seed=0, now_ms=1_000):
         port_range=(45000, 45010),
         client_factory=FakeXui,
         now_ms=lambda: now_ms,
-        rng=random.Random(seed),
+        rng=rng if rng is not None else random.Random(seed),
     )
 
 
@@ -78,21 +91,29 @@ def remark_of(specs, u):
 
 def test_provision_avoids_used_ports():
     specs = {"u1": {"inbounds": [{"port": 45000}, {"port": 45001}], "last_remark": ""}}
-    pool = _pool([_node("n1", "u1")], specs)
+    # 脚本先给 45000（已被占用，必须跳过），再给 45002（可用）
+    pool = _pool([_node("n1", "u1")], specs, rng=ScriptedRandom([45000, 45002]))
     got = pool.provision("x@mail.test")
-    assert got.inbound_id not in (45000, 45001)
+    assert got.inbound_id == 45002
+    # 45000 命中 used，绝不能尝试建号
+    assert specs["u1"].get("attempts", []) == [45002]
 
 
 def test_provision_retries_on_port_taken_then_succeeds():
     specs = {"u1": {"inbounds": [], "taken": {45000}, "last_remark": ""}}
-    pool = _pool([_node("n1", "u1")], specs)
+    # 45000 建号抛 XuiError，重试 45003 成功
+    pool = _pool([_node("n1", "u1")], specs, rng=ScriptedRandom([45000, 45003]))
     got = pool.provision("x@mail.test")
-    assert got.inbound_id != 45000
+    assert got.inbound_id == 45003
+    # 确实先试了 45000（撞端口）才换到 45003
+    assert specs["u1"]["attempts"] == [45000, 45003]
 
 
 def test_provision_falls_over_to_next_node_when_first_down():
     specs = {"bad": {"down": True}, "good": {"inbounds": [], "last_remark": ""}}
-    pool = _pool([_node("n1", "bad"), _node("n2", "good")], specs, seed=1)
+    # shuffle 恒等 → "bad" 仍排第一；bad 不可达 → failover 到 good
+    pool = _pool([_node("n1", "bad"), _node("n2", "good")], specs,
+                 rng=ScriptedRandom([45005]))
     got = pool.provision("x@mail.test")
     assert got.node_name == "n2"
 
