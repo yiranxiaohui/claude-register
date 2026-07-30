@@ -48,7 +48,7 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
         locale="en-US",
         geoip=geoip,
         window=(1280, 900),
-        env={"DISPLAY": display},
+        virtual_display=display,  # 挂到我们自管的 Xvfb :100，同时保留完整 os.environ
         **kwargs,
     )
     try:
