@@ -55,3 +55,61 @@ def test_register_proxy_not_redacted(tmp_path):
     save_config(path, {"register_proxy": "http://user:pass@1.2.3.4:8080"})
     d = to_redacted_dict(load_config(path))
     assert d["register_proxy"] == "http://user:pass@1.2.3.4:8080"
+
+
+def test_xui_defaults(tmp_path):
+    cfg = load_config(tmp_path / "nope.yaml")
+    assert cfg.xui_enabled is False
+    assert cfg.xui_expiry_days == 30
+    assert cfg.xui_port_min == 40000
+    assert cfg.xui_port_max == 60000
+    assert cfg.xui_nodes == ()
+
+
+def test_xui_nodes_roundtrip(tmp_path):
+    p = tmp_path / "config.yaml"
+    node = {"name": "usa-4", "base_url": "https://usa-4.test:2053/xyz",
+            "username": "u", "password": "secret", "proxy_host": "usa-4.example.com"}
+    save_config(p, {"xui_enabled": True, "xui_expiry_days": 15,
+                    "xui_port_min": 41000, "xui_port_max": 42000,
+                    "xui_nodes": [node]})
+    cfg = load_config(p)
+    assert cfg.xui_enabled is True
+    assert cfg.xui_expiry_days == 15
+    assert cfg.xui_port_min == 41000
+    assert cfg.xui_port_max == 42000
+    assert len(cfg.xui_nodes) == 1
+    assert cfg.xui_nodes[0]["name"] == "usa-4"
+    assert cfg.xui_nodes[0]["password"] == "secret"
+    assert cfg.xui_nodes[0]["proxy_host"] == "usa-4.example.com"
+
+
+def test_xui_yaml_uses_port_range_list(tmp_path):
+    p = tmp_path / "config.yaml"
+    save_config(p, {"xui_port_min": 41000, "xui_port_max": 42000})
+    raw = p.read_text(encoding="utf-8")
+    assert "port_range" in raw  # 落盘为 [min, max] 而非两个散字段
+
+
+def test_xui_node_password_redacted(tmp_path):
+    p = tmp_path / "config.yaml"
+    node = {"name": "usa-4", "base_url": "https://x", "username": "u",
+            "password": "secret", "proxy_host": ""}
+    save_config(p, {"xui_nodes": [node]})
+    d = to_redacted_dict(load_config(p))
+    assert d["xui_nodes"][0]["password"] == REDACTED
+    assert d["xui_nodes"][0]["name"] == "usa-4"
+
+
+def test_xui_node_blank_password_keeps_existing(tmp_path):
+    p = tmp_path / "config.yaml"
+    save_config(p, {"xui_nodes": [{"name": "usa-4", "base_url": "https://x",
+                                   "username": "u", "password": "secret",
+                                   "proxy_host": ""}]})
+    # 二次保存：同名节点密码传 REDACTED（面板脱敏回传）→ 应沿用旧密码
+    save_config(p, {"xui_nodes": [{"name": "usa-4", "base_url": "https://x2",
+                                   "username": "u2", "password": REDACTED,
+                                   "proxy_host": ""}]})
+    cfg = load_config(p)
+    assert cfg.xui_nodes[0]["password"] == "secret"
+    assert cfg.xui_nodes[0]["base_url"] == "https://x2"  # 其余字段照常更新

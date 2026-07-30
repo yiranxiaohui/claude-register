@@ -21,6 +21,19 @@ class Config:
     register_auto_login: bool = True
     register_code_regex: str = ""
     register_proxy: str = ""
+    xui_enabled: bool = False
+    xui_expiry_days: int = 30
+    xui_port_min: int = 40000
+    xui_port_max: int = 60000
+    xui_nodes: tuple = ()
+
+
+_NODE_KEYS = ("name", "base_url", "username", "password", "proxy_host")
+
+
+def _load_node(raw: dict) -> dict:
+    d = raw or {}
+    return {k: str(d.get(k, "") or "") for k in _NODE_KEYS}
 
 
 def load_config(path: Path) -> Config:
@@ -30,6 +43,9 @@ def load_config(path: Path) -> Config:
     panel = raw.get("panel", {}) or {}
     anymail = raw.get("anymail", {}) or {}
     reg = raw.get("register", {}) or {}
+    xui = raw.get("xui", {}) or {}
+    pr = xui.get("port_range") or [40000, 60000]
+    nodes = tuple(_load_node(n) for n in (xui.get("nodes") or []))
     return Config(
         panel_password=str(panel.get("password", "") or ""),
         panel_port=int(panel.get("port", 8790)),
@@ -41,6 +57,11 @@ def load_config(path: Path) -> Config:
         register_auto_login=bool(reg.get("auto_login", True)),
         register_code_regex=str(reg.get("code_regex", "") or ""),
         register_proxy=str(reg.get("proxy", "") or ""),
+        xui_enabled=bool(xui.get("enabled", False)),
+        xui_expiry_days=int(xui.get("expiry_days", 30)),
+        xui_port_min=int(pr[0]),
+        xui_port_max=int(pr[1]),
+        xui_nodes=nodes,
     )
 
 
@@ -65,10 +86,32 @@ def save_config(path: Path, updates: dict) -> Config:
     for secret in ("panel_password", "anymail_api_key"):
         if secret in clean and clean[secret] in ("", REDACTED, None):
             clean.pop(secret)
+    # xui 标量：不在 _FIELD_MAP，手动并入
+    xui_scalar = {}
+    for k in ("xui_enabled", "xui_expiry_days", "xui_port_min", "xui_port_max"):
+        if k in clean:
+            xui_scalar[k] = clean.pop(k)
+    incoming_nodes = clean.pop("xui_nodes", None)
     cfg = replace(cfg, **{k: v for k, v in clean.items() if k in _FIELD_MAP})
-    out: dict = {"panel": {}, "anymail": {}, "register": {}}
+    cfg = replace(cfg, **xui_scalar)
+    if incoming_nodes is not None:
+        old_by_name = {n["name"]: n for n in cfg.xui_nodes}
+        merged = []
+        for raw_node in incoming_nodes:
+            node = _load_node(raw_node)
+            if node["password"] in ("", REDACTED):
+                node["password"] = old_by_name.get(node["name"], {}).get("password", "")
+            merged.append(node)
+        cfg = replace(cfg, xui_nodes=tuple(merged))
+    out: dict = {"panel": {}, "anymail": {}, "register": {}, "xui": {}}
     for field, (section, key) in _FIELD_MAP.items():
         out[section][key] = getattr(cfg, field)
+    out["xui"] = {
+        "enabled": cfg.xui_enabled,
+        "expiry_days": cfg.xui_expiry_days,
+        "port_range": [cfg.xui_port_min, cfg.xui_port_max],
+        "nodes": [dict(n) for n in cfg.xui_nodes],
+    }
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(yaml.safe_dump(out, allow_unicode=True, sort_keys=False),
                           encoding="utf-8")
@@ -80,4 +123,11 @@ def to_redacted_dict(cfg: Config) -> dict:
     for secret in ("panel_password", "anymail_api_key"):
         if d[secret]:
             d[secret] = REDACTED
+    d["xui_enabled"] = cfg.xui_enabled
+    d["xui_expiry_days"] = cfg.xui_expiry_days
+    d["xui_port_min"] = cfg.xui_port_min
+    d["xui_port_max"] = cfg.xui_port_max
+    d["xui_nodes"] = [
+        {**n, "password": REDACTED if n.get("password") else ""} for n in cfg.xui_nodes
+    ]
     return d
