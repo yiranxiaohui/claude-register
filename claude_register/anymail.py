@@ -10,8 +10,8 @@ import base64
 import os
 import re
 import secrets
+import string
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -30,6 +30,11 @@ from claude_register.config import (
 from claude_register.console import log
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def random_local(length: int = 10) -> str:
+    """纯小写字母随机邮箱名——无固定前缀、不含数字，降低命中注册风控的概率。"""
+    return "".join(secrets.choice(string.ascii_lowercase) for _ in range(length))
 
 
 def load_dotenv(path: Path | None = None) -> None:
@@ -299,7 +304,7 @@ class AnyMailClient:
                 )
             dom = domains[0]
 
-        local = (local_part or "").strip().lower() or f"claude_{secrets.token_hex(4)}"
+        local = (local_part or "").strip().lower() or random_local()
         email = f"{local}@{dom}"
 
         body: dict[str, Any] = {"email": email}
@@ -319,7 +324,7 @@ class AnyMailClient:
                     json=body,
                 )
                 if resp.status_code == 409:
-                    local = f"claude_{uuid.uuid4().hex[:10]}"
+                    local = random_local(12)
                     email = f"{local}@{dom}"
                     body["email"] = email
                     last_error = resp.text[:300]

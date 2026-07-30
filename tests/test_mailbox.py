@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+
 import httpx
 import pytest
 import respx
@@ -118,13 +121,16 @@ def test_choose_suffix_no_domains_raises(client):
 @respx.mock
 def test_create_for_suffix_generates_random_local_part(client):
     route = respx.post(ACCOUNTS).mock(
-        return_value=httpx.Response(200, json=_account("claude_deadbeef@only.test"))
+        return_value=httpx.Response(200, json=_account("qwertyuiop@only.test"))
     )
     box = create_for_suffix(client, "only.test")
     assert box.email.endswith("@only.test")
-    sent = route.calls[0].request.read().decode()
-    assert "claude_" in sent
-    assert "expires_at" in sent  # 默认 24 小时
+    sent = json.loads(route.calls[0].request.read().decode())
+    local = sent["email"].split("@")[0]
+    # 纯小写字母、无 claude 前缀，降低命中注册风控的概率
+    assert re.fullmatch(r"[a-z]{8,}", local)
+    assert "claude" not in local
+    assert "expires_at" in json.dumps(sent)  # 默认 24 小时
 
 
 @respx.mock
@@ -132,14 +138,24 @@ def test_create_for_suffix_retries_on_conflict(client):
     route = respx.post(ACCOUNTS).mock(
         side_effect=[
             httpx.Response(409, json={"error": "account already exists"}),
-            httpx.Response(200, json=_account("claude_second@only.test")),
+            httpx.Response(200, json=_account("secondname@only.test")),
         ]
     )
     box = create_for_suffix(client, "only.test")
-    assert box.email == "claude_second@only.test"
-    first = route.calls[0].request.read().decode()
-    second = route.calls[1].request.read().decode()
-    assert first != second  # 必须换了前缀
+    assert box.email == "secondname@only.test"
+    first = json.loads(route.calls[0].request.read().decode())
+    second = json.loads(route.calls[1].request.read().decode())
+    assert first["email"] != second["email"]  # 必须换了本地部分
+    retry_local = second["email"].split("@")[0]
+    assert re.fullmatch(r"[a-z]{8,}", retry_local)
+
+
+def test_random_local_is_pure_letters_and_random():
+    from claude_register.anymail import random_local
+
+    a, b = random_local(), random_local()
+    assert re.fullmatch(r"[a-z]{8,}", a)
+    assert a != b
 
 
 @respx.mock

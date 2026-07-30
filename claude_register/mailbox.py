@@ -57,11 +57,11 @@ def choose_suffix(
 def create_for_suffix(
     client: AnyMailClient, domain: str, *, expires_hours: float | None = None
 ) -> Mailbox:
-    """按后缀建一个新邮箱，前缀随机（claude_<8位hex>）。"""
+    """按后缀建一个新邮箱，本地部分随机（纯小写字母）。"""
     if expires_hours is None:
         expires_hours = resolve_expires_hours(os.getenv("ANYMAIL_EXPIRES_HOURS"))
     box = client.create_mailbox(
-        local_part=None,  # 交给 anymail 生成 claude_<8位hex>
+        local_part=None,  # 交给 anymail 生成纯字母随机名
         domain=domain,
         expires_hours=expires_hours,
     )
