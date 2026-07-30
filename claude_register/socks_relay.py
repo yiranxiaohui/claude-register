@@ -15,6 +15,7 @@ playwright driver 的 `normalizeProxySettings` 里就一句
 
 from __future__ import annotations
 
+import os
 import socket
 import socketserver
 import struct
@@ -63,6 +64,28 @@ RETRY_DEADLINE = 12.0
 
 # SOCKS5 认证子协商里用户名/密码都是单字节长度前缀，最长 255。
 MAX_CREDENTIAL_LEN = 255
+
+# 上游并发上限。机场类上游有硬并发连接数上限（实测这个上游约 4 条），超限的
+# 连接会被挂住（不回复），中继若无限并发转发就会超订上游：claude.ai 登录页
+# 十几条并发会把关键连接（hcaptcha、验证码提交）挤掉，表现为满屏「上游握手
+# 超时」且注册偶发失败。用信号量把中继对上游的并发闸到这个值，超出的连接在
+# 本地排队等槽位而不是冲上游被挂死。可用环境变量 RELAY_MAX_UPSTREAM 覆盖。
+# 默认取 3 而非实测的 ~4：留一格余量，免得上游偶尔只放 3 条（关连接的 TIME_WAIT
+# 残留、服务端抖动）时又擦边超订、重新触发 hang。确知上游能吃满 4 条时可上调。
+DEFAULT_MAX_UPSTREAM = 3
+
+# 等本地槽位的上限。排队是常态，给足耐心；但不能无限等——真出现死锁式占满
+# 时，超过这个时间就回一个明确的失败码，好过让浏览器一路挂到导航超时。
+SLOT_WAIT_TIMEOUT = 30.0
+
+
+def _default_max_upstream() -> int:
+    raw = os.environ.get("RELAY_MAX_UPSTREAM", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_UPSTREAM
+    return value if value > 0 else DEFAULT_MAX_UPSTREAM
 
 
 def _looks_like_ipv4(text: str) -> bool:
@@ -220,6 +243,7 @@ class _Handler(socketserver.BaseRequestHandler):
         client = self.request
         upstream: socket.socket | None = None
         replied = False  # CONNECT 回过之后就进数据流了，不能再往里塞协议字节
+        slot_held = False  # 是否占着上游并发槽位，决定 finally 里要不要 release
         self.server.track(client)
         try:
             client.settimeout(HANDSHAKE_TIMEOUT)
@@ -255,6 +279,19 @@ class _Handler(socketserver.BaseRequestHandler):
             if cmd != CMD_CONNECT:
                 self._reply(client, REP_CMD_NOT_SUPPORTED)
                 return
+
+            # 占一个上游并发槽位，全程持有到隧道结束——上游的限额是对「同时打开
+            # 的连接数」而言，只在握手期占位挡不住后面并发的数据连接超订。拿不到
+            # 槽位就在本地排队等，超过 SLOT_WAIT_TIMEOUT 才认输回失败码。
+            if not self.server.upstream_slots.acquire(timeout=SLOT_WAIT_TIMEOUT):
+                if not self.server.quiet.is_set():
+                    self.server.on_error(
+                        f"{host}:{port} → 等待上游并发槽位超时（{SLOT_WAIT_TIMEOUT:.0f}s，"
+                        "上游并发已满）"
+                    )
+                self._reply(client, REP_HOST_UNREACHABLE)
+                return
+            slot_held = True
 
             try:
                 upstream = _connect_upstream(self.server.upstream_cfg, host, port)
@@ -298,6 +335,9 @@ class _Handler(socketserver.BaseRequestHandler):
                     upstream.close()
                 except OSError:
                     pass
+            # 隧道彻底收尾后再释放槽位，让等待的连接接手一个真正空出来的槽。
+            if slot_held:
+                self.server.upstream_slots.release()
 
     @staticmethod
     def _reply(client: socket.socket, rep: int) -> None:
@@ -318,9 +358,11 @@ class _Server(socketserver.ThreadingTCPServer):
     # 新连接会被内核直接拒（或干脆丢弃等重传），表现就是页面偶发加载不全。
     request_queue_size = 128
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, max_upstream: int = DEFAULT_MAX_UPSTREAM, **kwargs):
         self._live: set[socket.socket] = set()
         self._live_lock = threading.Lock()
+        # 限中继对上游的并发连接数，匹配上游的硬上限，避免超订。
+        self.upstream_slots = threading.BoundedSemaphore(max_upstream)
         super().__init__(*args, **kwargs)
 
     def track(self, sock: socket.socket) -> None:
@@ -367,9 +409,12 @@ class SocksRelay:
 
     host = "127.0.0.1"
 
-    def __init__(self, upstream_url: str, *, on_error=None):
+    def __init__(self, upstream_url: str, *, on_error=None, max_upstream: int | None = None):
         self._cfg = self._parse_upstream(upstream_url)
         self._on_error = on_error or (lambda msg: None)
+        self._max_upstream = (
+            max_upstream if max_upstream and max_upstream > 0 else _default_max_upstream()
+        )
         self._server: _Server | None = None
         self._thread: threading.Thread | None = None
         self.port: int | None = None
@@ -405,7 +450,7 @@ class SocksRelay:
         return f"socks5://{self.host}:{self.port}"
 
     def start(self) -> SocksRelay:
-        server = _Server((self.host, 0), _Handler)
+        server = _Server((self.host, 0), _Handler, max_upstream=self._max_upstream)
         server.upstream_cfg = self._cfg
         server.on_error = self._on_error
         server.quiet = threading.Event()
