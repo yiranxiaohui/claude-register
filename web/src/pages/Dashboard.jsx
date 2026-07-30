@@ -30,6 +30,8 @@ export default function Dashboard() {
 
   const [selectedRun, setSelectedRun] = useState(null); // full detail
   const [rerunError, setRerunError] = useState("");
+  const [copiedEmail, setCopiedEmail] = useState("");
+  const [exportError, setExportError] = useState("");
 
   const logPanelRef = useRef(null);
   const esRef = useRef(null);
@@ -111,6 +113,45 @@ export default function Dashboard() {
       } else {
         setRerunError(`「${acctEmail}」重跑失败`);
       }
+    }
+  }
+
+  async function copyLine(acct) {
+    const text = acct.line || acct.email;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // http 面板无 clipboard API，退回 execCommand
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopiedEmail(acct.email);
+      setTimeout(() => setCopiedEmail(""), 1500);
+    } catch {
+      setExportError("复制失败，请手动复制");
+    }
+  }
+
+  async function exportAll() {
+    setExportError("");
+    try {
+      const text = await api.exportAccountsText();
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "accounts.txt";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setExportError("导出失败，请重试");
     }
   }
 
@@ -220,7 +261,15 @@ export default function Dashboard() {
       </section>
 
       <section className="card">
-        <h2 className="card-title">账号列表</h2>
+        <div className="card-header-row">
+          <h2 className="card-title">账号列表</h2>
+          {accounts.length > 0 && (
+            <button className="btn btn-small" onClick={exportAll}>
+              导出全部
+            </button>
+          )}
+        </div>
+        {exportError && <div className="error-msg">{exportError}</div>}
         {accounts.length === 0 ? (
           <div className="empty-hint">暂无账号</div>
         ) : (
@@ -239,6 +288,9 @@ export default function Dashboard() {
                   </span>
                 </span>
                 <StatusBadge status={a.status} />
+                <button className="btn btn-small" onClick={() => copyLine(a)}>
+                  {copiedEmail === a.email ? "已复制" : "复制"}
+                </button>
                 <button
                   className="btn btn-small"
                   onClick={() => doRerun(a.email)}

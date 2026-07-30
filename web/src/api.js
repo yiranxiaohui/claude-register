@@ -42,6 +42,16 @@ export const api = {
 
   listAccounts: () => fetch("/api/accounts").then(j),
 
+  exportAccountsText: () =>
+    fetch("/api/accounts/export").then((r) => {
+      if (!r.ok) {
+        const err = new Error(`http ${r.status}`);
+        err.status = r.status;
+        throw err;
+      }
+      return r.text();
+    }),
+
   rerun: (email) =>
     fetch(`/api/accounts/${encodeURIComponent(email)}/rerun`, {
       method: "POST",
