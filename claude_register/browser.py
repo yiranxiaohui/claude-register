@@ -179,17 +179,12 @@ def validate_proxy(url: str | None) -> dict | None:
     return cfg
 
 
-@contextmanager
-def browser_session(proxy: str | None = None):
-    """启动 Camoufox（Firefox 系隐身浏览器）会话。
+def build_camoufox_kwargs(proxy: str | None) -> tuple[dict, "SocksRelay | None", str | bool]:
+    """把代理配置转成 Camoufox 的 proxy kwargs，并决定 geoip。
 
-    headless 档位由 pick_headless() 按平台自动选：Linux 容器走 "virtual"（Xvfb），
-    Windows/macOS 走 False（桌面真显示器）。两者都比真 headless 更抗 Cloudflare 检测。
-    humanize 提供人性化光标移动；locale/geoip 让指纹统一
-    （配了代理时 geoip 按代理出口 IP 匹配时区/地理指纹）。
-
-    带认证的 SOCKS5 会先在本地拉起一个免认证中继（见 socks_relay），
-    浏览器只连 127.0.0.1，凭据由中继负责递给上游。
+    注册会话与接管会话共用这段：解析代理 → 带认证 SOCKS5 起本地中继 →
+    用出口 IP 对齐 geoip → 组 kwargs。返回 (kwargs, relay, geoip)，
+    relay 需由调用方在会话结束时 stop()。
     """
     proxy_cfg = parse_proxy(proxy)
     relay = None
@@ -236,6 +231,22 @@ def browser_session(proxy: str | None = None):
         else:
             kwargs["proxy"] = proxy_cfg
             log(f"使用代理：{proxy_cfg['server']}")
+    return kwargs, relay, geoip
+
+
+@contextmanager
+def browser_session(proxy: str | None = None):
+    """启动 Camoufox（Firefox 系隐身浏览器）会话。
+
+    headless 档位由 pick_headless() 按平台自动选：Linux 容器走 "virtual"（Xvfb），
+    Windows/macOS 走 False（桌面真显示器）。两者都比真 headless 更抗 Cloudflare 检测。
+    humanize 提供人性化光标移动；locale/geoip 让指纹统一
+    （配了代理时 geoip 按代理出口 IP 匹配时区/地理指纹）。
+
+    带认证的 SOCKS5 会先在本地拉起一个免认证中继（见 socks_relay），
+    浏览器只连 127.0.0.1，凭据由中继负责递给上游。
+    """
+    kwargs, relay, geoip = build_camoufox_kwargs(proxy)
     headless = pick_headless()
     cm = Camoufox(
         headless=headless,
