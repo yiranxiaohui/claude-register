@@ -96,3 +96,37 @@ def test_takeover_stopped_on_server_shutdown(tmp_path, monkeypatch):
         mgr = app.state.cr.takeover
     # 退出 with 后 shutdown 钩子应已调用兜底 stop()。
     assert mgr.stops >= 1
+
+
+def test_vnc_static_requires_auth(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    novnc = tmp_path / "novnc"; novnc.mkdir()
+    (novnc / "vnc.html").write_text("<html>novnc</html>")
+    monkeypatch.setenv("NOVNC_DIR", str(novnc))
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app)
+    assert c.get("/vnc/vnc.html").status_code == 401
+    _login(c)
+    r = c.get("/vnc/vnc.html")
+    assert r.status_code == 200 and "novnc" in r.text
+
+
+def test_vnc_static_blocks_traversal(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    novnc = tmp_path / "novnc"; novnc.mkdir()
+    (novnc / "vnc.html").write_text("ok")
+    monkeypatch.setenv("NOVNC_DIR", str(novnc))
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app); _login(c)
+    assert c.get("/vnc/../../etc/passwd").status_code == 404
+
+
+def test_vnc_ws_rejects_without_cookie(tmp_path, monkeypatch):
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app)
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/vnc/websockify") as ws:
+            ws.receive_bytes()

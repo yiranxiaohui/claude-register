@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import os
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -233,6 +234,55 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     @app.get("/api/takeover")
     def takeover_status(_=Depends(require_auth)):
         return state.takeover.status()
+
+    NOVNC_DIR = os.environ.get("NOVNC_DIR", "/usr/share/novnc")
+
+    @app.get("/vnc/{path:path}")
+    def vnc_static(path: str, _=Depends(require_auth)):
+        base = Path(NOVNC_DIR).resolve()
+        target = (base / (path or "vnc.html")).resolve()
+        if base != target and base not in target.parents:
+            raise HTTPException(status_code=404)
+        if not target.is_file():
+            raise HTTPException(status_code=404)
+        return FileResponse(target)
+
+    @app.websocket("/vnc/websockify")
+    async def vnc_ws(ws: WebSocket):
+        cfg = state.config()
+        token = ws.cookies.get(auth.COOKIE_NAME, "")
+        if not cfg.panel_password or not auth.verify_token(token, cfg.panel_password, state.secret):
+            await ws.close(code=1008)
+            return
+        await ws.accept(subprotocol="binary")
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", 5900)
+        except Exception:
+            await ws.close(code=1011)
+            return
+
+        async def ws_to_tcp():
+            try:
+                while True:
+                    data = await ws.receive_bytes()
+                    writer.write(data)
+                    await writer.drain()
+            except Exception:
+                pass
+            finally:
+                writer.close()
+
+        async def tcp_to_ws():
+            try:
+                while True:
+                    data = await reader.read(65536)
+                    if not data:
+                        break
+                    await ws.send_bytes(data)
+            except Exception:
+                pass
+
+        await asyncio.gather(ws_to_tcp(), tcp_to_ws())
 
     # 截图/日志工件：必须鉴权 + 防路径穿越（不能用裸 StaticFiles，mount 不继承 Depends）
     runs_dir = state.data_dir / "runs"
