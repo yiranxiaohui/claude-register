@@ -101,6 +101,28 @@ def test_delete_inbound_hits_del_path():
 
 
 @respx.mock
+def test_delete_inbound_swallows_api_failure():
+    _login_route(respx)
+    respx.post(f"{BASE}/panel/api/inbounds/del/7").mock(
+        return_value=httpx.Response(
+            200, json={"success": False, "msg": "not found", "obj": None}
+        )
+    )
+    # 回收路径：API success=false 也不应抛出
+    XuiClient(BASE, "u", "p").delete_inbound(7)
+
+
+@respx.mock
+def test_delete_inbound_swallows_transport_error():
+    _login_route(respx)
+    respx.post(f"{BASE}/panel/api/inbounds/del/7").mock(
+        side_effect=httpx.ConnectError("boom")
+    )
+    # 回收路径：传输错误也不应抛出
+    XuiClient(BASE, "u", "p").delete_inbound(7)
+
+
+@respx.mock
 def test_relogin_on_non_json_session_expiry():
     # 首次列表返回登录页 HTML（会话失效），应重登后重试成功
     login = _login_route(respx)

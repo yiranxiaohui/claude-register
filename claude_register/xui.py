@@ -121,6 +121,6 @@ class XuiClient:
     def delete_inbound(self, inbound_id: int) -> None:
         try:
             self._call("POST", f"/panel/api/inbounds/del/{inbound_id}")
-        except XuiError as exc:
-            # 已不存在等价于目标达成；其余失败只警告——inbound 带 expiryTime 兜底。
+        except Exception as exc:  # noqa: BLE001
+            # delete 是回收路径，任何失败都只警告，inbound 带 expiryTime 兜底。
             log(f"删除 inbound {inbound_id} 失败（{exc}），忽略。")
