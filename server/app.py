@@ -269,8 +269,6 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
                     await writer.drain()
             except Exception:
                 pass
-            finally:
-                writer.close()
 
         async def tcp_to_ws():
             try:
@@ -282,7 +280,18 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             except Exception:
                 pass
 
-        await asyncio.gather(ws_to_tcp(), tcp_to_ws())
+        tasks = [asyncio.create_task(ws_to_tcp()), asyncio.create_task(tcp_to_ws())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            writer.close()
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
     # 截图/日志工件：必须鉴权 + 防路径穿越（不能用裸 StaticFiles，mount 不继承 Depends）
     runs_dir = state.data_dir / "runs"
