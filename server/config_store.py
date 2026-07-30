@@ -16,7 +16,7 @@ class Config:
     anymail_api_key: str = ""
     anymail_base_url: str = ""
     anymail_domain: str = ""
-    anymail_expires_hours: float = 24.0
+    anymail_expires_hours: float = 0.0  # <=0 表示永久（默认）
     register_login_timeout: float = 120.0
     register_auto_login: bool = True
     register_code_regex: str = ""
@@ -36,7 +36,7 @@ def load_config(path: Path) -> Config:
         anymail_api_key=str(anymail.get("api_key", "") or ""),
         anymail_base_url=str(anymail.get("base_url", "") or ""),
         anymail_domain=str(anymail.get("domain", "") or ""),
-        anymail_expires_hours=float(anymail.get("expires_hours", 24.0)),
+        anymail_expires_hours=float(anymail.get("expires_hours", 0.0)),
         register_login_timeout=float(reg.get("login_timeout", 120.0)),
         register_auto_login=bool(reg.get("auto_login", True)),
         register_code_regex=str(reg.get("code_regex", "") or ""),

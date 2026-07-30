@@ -259,7 +259,7 @@ class AnyMailClient:
         self,
         email: str,
         *,
-        expires_hours: float | None = 24.0,
+        expires_hours: float | None = None,
         tag: str | None = "claude-register",
     ) -> Mailbox:
         """按完整邮箱地址选用已有账号；不存在则创建。"""
@@ -285,7 +285,7 @@ class AnyMailClient:
         *,
         local_part: str | None = None,
         domain: str | None = None,
-        expires_hours: float | None = 24.0,
+        expires_hours: float | None = None,
         tag: str | None = "claude-register",
     ) -> Mailbox:
         """POST /api/accounts 创建临时邮箱。"""

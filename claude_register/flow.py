@@ -301,6 +301,6 @@ def run(
         log(f"sessionKey：{sk[:16]}…（共 {len(sk)} 字符，已写入 accounts 文件）")
     else:
         log("未保存 sessionKey（登录/建号可能未完成）。")
-    log("提示：邮箱默认 24 小时后被 AnyMail 清理，若要长期收信请调整有效期。")
+    log("提示：邮箱默认永久保留；若显式设置了正数有效期，到期会被 AnyMail 清理。")
     # Claude 魔术链接注册无独立密码；password 字段默认空，仅作导出占位。
     return account

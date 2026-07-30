@@ -12,12 +12,17 @@ from claude_register.config import (
 )
 
 
+def test_default_expires_is_permanent():
+    """默认有效期是永久(None)——注册成功的账号邮箱不能被 AnyMail cron 清掉。"""
+    assert DEFAULT_EXPIRES_HOURS is None
+
+
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        (None, DEFAULT_EXPIRES_HOURS),
-        ("", DEFAULT_EXPIRES_HOURS),
-        ("   ", DEFAULT_EXPIRES_HOURS),
+        (None, None),
+        ("", None),
+        ("   ", None),
         ("48", 48.0),
         ("1.5", 1.5),
         ("0", None),
@@ -29,8 +34,8 @@ def test_resolve_expires_hours(raw, expected):
 
 
 def test_resolve_expires_hours_invalid_falls_back(capsys):
-    """非数字用默认值，并且要提示用户，不能静默。"""
-    assert resolve_expires_hours("abc") == DEFAULT_EXPIRES_HOURS
+    """非数字用默认值(永久)，并且要提示用户，不能静默。"""
+    assert resolve_expires_hours("abc") is DEFAULT_EXPIRES_HOURS is None
     assert "ANYMAIL_EXPIRES_HOURS" in capsys.readouterr().out
 
 

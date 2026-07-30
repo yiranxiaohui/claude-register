@@ -10,7 +10,7 @@ const FIELD_DEFS = [
   { key: "anymail_api_key", label: "AnyMail API Key", type: "password", secret: true },
   { key: "anymail_base_url", label: "AnyMail Base URL", type: "text" },
   { key: "anymail_domain", label: "AnyMail 域名", type: "text" },
-  { key: "anymail_expires_hours", label: "邮箱有效期（小时）", type: "number" },
+  { key: "anymail_expires_hours", label: "邮箱有效期（小时，0=永久）", type: "number" },
   { key: "register_login_timeout", label: "登录超时（秒）", type: "number" },
   { key: "register_auto_login", label: "注册后自动登录", type: "checkbox" },
   { key: "register_code_regex", label: "验证码正则", type: "text" },

@@ -124,7 +124,7 @@ def test_create_for_suffix_generates_random_local_part(client):
     assert box.email.endswith("@only.test")
     sent = route.calls[0].request.read().decode()
     assert "claude_" in sent
-    assert "expires_at" in sent  # 默认 24 小时
+    assert "expires_at" not in sent  # 默认永久，不传 expires_at
 
 
 @respx.mock

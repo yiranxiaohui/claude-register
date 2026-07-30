@@ -5,7 +5,7 @@ from server.config_store import load_config, save_config, to_redacted_dict, REDA
 def test_load_missing_returns_defaults(tmp_path):
     cfg = load_config(tmp_path / "nope.yaml")
     assert cfg.panel_port == 8790
-    assert cfg.anymail_expires_hours == 24.0
+    assert cfg.anymail_expires_hours == 0.0  # 0 = 永久
     assert cfg.register_auto_login is True
     assert cfg.panel_password == ""
 
