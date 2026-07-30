@@ -12,6 +12,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from claude_register import flow
 from claude_register.accounts import AccountRecord
+from claude_register.proxy_pool import ProxyPool, XuiNode
+from claude_register.xui import XuiClient, XuiError
 from server import auth, db
 from server.config_store import save_config, to_redacted_dict
 from server.deps import AppState, default_now
@@ -72,6 +74,38 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         body = await request.json()
         cfg = save_config(state.config_path, body)
         return to_redacted_dict(cfg)
+
+    @app.post("/api/xui/test")
+    async def xui_test(request: Request, _=Depends(require_auth)):
+        body = await request.json()
+        base_url = str(body.get("base_url", "") or "")
+        username = str(body.get("username", "") or "")
+        password = str(body.get("password", "") or "")
+        if password in ("", "••••"):
+            # 脱敏回传：按 base_url 找已存节点取真实密码
+            for n in state.config().xui_nodes:
+                if n.get("base_url") == base_url:
+                    password = n.get("password", "")
+                    break
+        try:
+            count = len(XuiClient(base_url, username, password).list_inbounds())
+        except Exception as exc:  # noqa: BLE001 — 面板测试连接需回报任何失败
+            raise HTTPException(status_code=400, detail=f"连接失败：{exc}")
+        return {"ok": True, "inbound_count": count}
+
+    @app.post("/api/xui/cleanup")
+    def xui_cleanup(_=Depends(require_auth)):
+        cfg = state.config()
+        nodes = [XuiNode(**n) for n in cfg.xui_nodes]
+        if not nodes:
+            return {"results": {}, "total": 0}
+        pool = ProxyPool(
+            nodes,
+            expiry_days=cfg.xui_expiry_days,
+            port_range=(cfg.xui_port_min, cfg.xui_port_max),
+        )
+        results = pool.cleanup_expired()
+        return {"results": results, "total": sum(results.values())}
 
     @app.post("/api/runs")
     async def start_run(request: Request, _=Depends(require_auth)):
