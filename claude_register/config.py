@@ -18,17 +18,19 @@ FALLBACK_CODE_REGEX = r"(?<![#0-9A-Fa-f])\b(\d{6})\b"
 # 魔术链接：https://claude.ai/magic-link#<32位hex>:<base64(邮箱)>
 MAGIC_LINK_REGEX = r"https://claude\.ai/magic-link#[A-Za-z0-9+/=:._-]+"
 
-DEFAULT_EXPIRES_HOURS = 24.0
+# 默认永久：注册成功的账号邮箱之后还要收信（改密码、设备验证），
+# 不能被 AnyMail 的到期 cron 清掉。要限时邮箱由用户显式设置正数小时。
+DEFAULT_EXPIRES_HOURS: float | None = None
 
 
 def resolve_expires_hours(
     raw: str | None,
     *,
-    default: float = DEFAULT_EXPIRES_HOURS,
+    default: float | None = DEFAULT_EXPIRES_HOURS,
 ) -> float | None:
     """解析邮箱有效期小时数。
 
-    空 → default；正数 → 该值；<=0 → None（永久，不传 expires_at）。
+    空 → default（默认永久）；正数 → 该值；<=0 → None（永久，不传 expires_at）。
     非数字 → default，并打印提示。
     """
     text = (raw or "").strip()
@@ -37,7 +39,8 @@ def resolve_expires_hours(
     try:
         hours = float(text)
     except ValueError:
-        log(f"ANYMAIL_EXPIRES_HOURS={text!r} 不是数字，改用默认 {default} 小时。")
+        label = "永久" if default is None else f"{default} 小时"
+        log(f"ANYMAIL_EXPIRES_HOURS={text!r} 不是数字，改用默认（{label}）。")
         return default
     return hours if hours > 0 else None
 
