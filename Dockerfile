@@ -14,6 +14,8 @@ FROM python:3.13-slim
 # 找不到 libasound2，把它换成 libasound2t64 即可。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
+    x11vnc \
+    novnc \
     libgtk-3-0 \
     libx11-xcb1 \
     libasound2 \
