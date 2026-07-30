@@ -139,3 +139,8 @@ def upsert_account(
 def list_accounts(conn) -> list[dict]:
     rows = conn.execute("SELECT * FROM accounts ORDER BY rowid DESC").fetchall()
     return [dict(r) for r in rows]
+
+
+def get_account(conn, email) -> dict | None:
+    row = conn.execute("SELECT * FROM accounts WHERE email=?", (email,)).fetchone()
+    return dict(row) if row else None

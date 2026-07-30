@@ -16,6 +16,7 @@ from server import auth, db
 from server.config_store import save_config, to_redacted_dict
 from server.deps import AppState, default_now
 from server.runner import RunnerBusy
+from server.takeover import TakeoverBusy
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
@@ -195,6 +196,43 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         except RunnerBusy:
             raise HTTPException(status_code=409, detail="已有任务在运行")
         return {"run_id": rid}
+
+    @app.post("/api/takeover/start")
+    async def takeover_start(request: Request, _=Depends(require_auth)):
+        cfg = state.config()
+        if not cfg.takeover_enabled:
+            raise HTTPException(status_code=403, detail="接管功能已禁用")
+        body = await request.json()
+        email = str(body.get("email", "") or "")
+        row = db.get_account(state.conn, email)
+        if row is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if not row.get("session_key"):
+            raise HTTPException(status_code=400, detail="该账号无 sessionKey")
+        try:
+            info = await asyncio.to_thread(
+                state.takeover.start,
+                email=email,
+                session_key=row["session_key"],
+                proxy=row.get("proxy") or "",
+                idle_timeout_s=cfg.takeover_idle_timeout_min * 60,
+            )
+        except TakeoverBusy:
+            raise HTTPException(status_code=409, detail="已有接管会话，请先结束")
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"启动接管失败：{exc}")
+        return info
+
+    @app.post("/api/takeover/stop")
+    def takeover_stop(_=Depends(require_auth)):
+        state.takeover.stop()
+        return {"ok": True}
+
+    @app.get("/api/takeover")
+    def takeover_status(_=Depends(require_auth)):
+        return state.takeover.status()
 
     # 截图/日志工件：必须鉴权 + 防路径穿越（不能用裸 StaticFiles，mount 不继承 Depends）
     runs_dir = state.data_dir / "runs"
