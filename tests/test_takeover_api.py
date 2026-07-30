@@ -12,6 +12,7 @@ def _client(tmp_path, monkeypatch):
         def __init__(self, *a, **k):
             self._running = False
             self._email = None
+            self.stops = 0
         def start(self, *, email, session_key, proxy="", idle_timeout_s=900):
             from server.takeover import TakeoverBusy
             if self._running:
@@ -19,6 +20,7 @@ def _client(tmp_path, monkeypatch):
             self._running = True; self._email = email
             return {"email": email, "started_at": "2026-07-30T00:00:00Z"}
         def stop(self):
+            self.stops += 1
             self._running = False; self._email = None
         def status(self):
             return {"running": self._running, "email": self._email,
@@ -83,3 +85,14 @@ def test_takeover_start_stop_status_flow(tmp_path, monkeypatch):
     assert c.post("/api/takeover/start", json={"email": "a@x.com"}).status_code == 409
     assert c.post("/api/takeover/stop").status_code == 200
     assert c.get("/api/takeover").json()["running"] is False
+
+
+def test_takeover_stopped_on_server_shutdown(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    app = _client(tmp_path, monkeypatch)
+    # TestClient 作上下文管理器：进入触发 startup，退出触发 shutdown。
+    with TestClient(app) as c:
+        _login(c)
+        mgr = app.state.cr.takeover
+    # 退出 with 后 shutdown 钩子应已调用兜底 stop()。
+    assert mgr.stops >= 1

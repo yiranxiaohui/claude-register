@@ -202,7 +202,7 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         cfg = state.config()
         if not cfg.takeover_enabled:
             raise HTTPException(status_code=403, detail="接管功能已禁用")
-        body = await request.json()
+        body = await request.json() if await request.body() else {}
         email = str(body.get("email", "") or "")
         row = db.get_account(state.conn, email)
         if row is None:
@@ -247,6 +247,12 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         if not target.is_file():
             raise HTTPException(status_code=404)
         return FileResponse(target)
+
+    @app.on_event("shutdown")
+    def _cleanup_takeover():
+        # server 关闭/重启时兜底清理接管会话，避免 Xvfb/x11vnc/浏览器变孤儿进程。
+        # stop() 幂等，没在跑也安全。
+        state.takeover.stop()
 
     # 前端（dist 存在才挂，测试环境无 dist 不报错）
     if WEB_DIST.exists():
