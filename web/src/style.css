@@ -309,6 +309,18 @@ code,
   font-size: 13px;
 }
 
+.takeover-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--running);
+  background: var(--running-bg);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
 .empty-hint {
   color: var(--text-faint);
   font-size: 13px;

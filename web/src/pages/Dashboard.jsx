@@ -27,6 +27,8 @@ export default function Dashboard() {
 
   const [runs, setRuns] = useState([]);
   const [accounts, setAccounts] = useState([]);
+  const [takeover, setTakeover] = useState({ running: false, email: null });
+  const [takeoverError, setTakeoverError] = useState("");
 
   const [selectedRun, setSelectedRun] = useState(null); // full detail
   const [rerunError, setRerunError] = useState("");
@@ -39,6 +41,7 @@ export default function Dashboard() {
   function refreshLists() {
     api.listRuns().then(setRuns).catch(() => {});
     api.listAccounts().then(setAccounts).catch(() => {});
+    api.takeoverStatus().then(setTakeover).catch(() => {});
   }
 
   useEffect(() => {
@@ -138,6 +141,39 @@ export default function Dashboard() {
       setExportError("复制失败，请手动复制");
     }
   }
+
+  const startTakeover = async (acctEmail) => {
+    setTakeoverError("");
+    try {
+      await api.takeoverStart(acctEmail);
+      const st = await api.takeoverStatus();
+      setTakeover(st);
+      window.open(
+        "/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify",
+        "_blank",
+        "noopener",
+      );
+    } catch (e) {
+      setTakeoverError(
+        e.status === 409
+          ? "已有接管会话，请先结束"
+          : e.status === 400
+            ? "该账号无 sessionKey"
+            : e.status === 403
+              ? "接管功能已禁用"
+              : `启动接管失败（${e.status || "?"}）`,
+      );
+    }
+  };
+
+  const stopTakeover = async () => {
+    try {
+      await api.takeoverStop();
+      setTakeover({ running: false, email: null });
+    } catch {
+      /* ignore */
+    }
+  };
 
   async function exportAll() {
     setExportError("");
@@ -269,6 +305,15 @@ export default function Dashboard() {
             </button>
           )}
         </div>
+        {takeover.running && (
+          <div className="takeover-bar">
+            正在接管：{takeover.email}
+            <button className="btn btn-small" onClick={stopTakeover}>
+              结束接管
+            </button>
+          </div>
+        )}
+        {takeoverError && <div className="error-msg">{takeoverError}</div>}
         {exportError && <div className="error-msg">{exportError}</div>}
         {accounts.length === 0 ? (
           <div className="empty-hint">暂无账号</div>
@@ -298,6 +343,14 @@ export default function Dashboard() {
                 >
                   重跑
                 </button>
+                {a.session_key && (
+                  <button
+                    className="btn btn-small"
+                    onClick={() => startTakeover(a.email)}
+                  >
+                    接管
+                  </button>
+                )}
               </li>
             ))}
           </ul>
