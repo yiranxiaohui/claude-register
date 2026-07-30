@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from claude_register.console import banner, log
 from claude_register.mailbox import prepare_mailbox
+from claude_register.proxy_pool import ProvisionedProxy, ProxyPool, XuiNode
 
 if TYPE_CHECKING:
     from server.config_store import Config
@@ -66,11 +67,13 @@ def run_browser(
     password: str = "",
     poll_client: AnyMailClient | None = None,
     mail_key: str = "",
+    proxy_meta: dict | None = None,
 ) -> dict | None:
     """跑浏览器登录/建号。成功拿到 sessionKey 时返回账号 dict，否则 None。
 
     poll_client：接码轮询用的客户端（子 key）；None 时回落用 client（父 key）。
     mail_key：随账号导出的子 key 明文；降级时空串，父 key 绝不写进导出。
+    proxy_meta：3x-ui 专属代理的 {node, inbound_id, expiry_ms}；随账号写入 extra["xui"]。
     """
     poll = poll_client or client
     account: dict | None = None
@@ -95,6 +98,7 @@ def run_browser(
             mailbox_id=str(mailbox.id or ""),
             mail_key=mail_key,
             mail_base_url=client.base_url if mail_key else "",
+            extra={"xui": proxy_meta} if proxy_meta else {},
         )
         paths = save_account_record(record, output_dir=_output_dir.get())
         account = record.to_dict()
@@ -207,6 +211,18 @@ def run_browser(
     return account
 
 
+def _build_proxy_pool(config: "Config") -> ProxyPool | None:
+    """启用 xui 且配了节点时返回代理池，否则 None（退回静态 register_proxy）。"""
+    if not getattr(config, "xui_enabled", False) or not config.xui_nodes:
+        return None
+    nodes = [XuiNode(**n) for n in config.xui_nodes]
+    return ProxyPool(
+        nodes,
+        expiry_days=config.xui_expiry_days,
+        port_range=(config.xui_port_min, config.xui_port_max),
+    )
+
+
 def run(
     *,
     email: str | None = None,
@@ -238,15 +254,25 @@ def run(
         expires_hours = None
         proxy = None
 
-    # 代理校验放在建邮箱之前：非法代理应尽早失败，别浪费一个刚建好的 AnyMail 邮箱。
-    # 不能只查 URL 格式——带认证的 socks5 还要经中继，中继构造时才会发现凭据超长
-    # 之类的问题，那时邮箱已经建出来了。这里把两层校验都跑一遍。
-    validate_proxy(proxy)
+    pool = _build_proxy_pool(config) if config is not None else None
+    if pool is None:
+        # 静态代理路径：保持原校验（非法代理尽早失败）。
+        # 代理校验放在建邮箱之前：非法代理应尽早失败，别浪费一个刚建好的 AnyMail 邮箱。
+        # 不能只查 URL 格式——带认证的 socks5 还要经中继，中继构造时才会发现凭据超长
+        # 之类的问题，那时邮箱已经建出来了。这里把两层校验都跑一遍。
+        validate_proxy(proxy)
 
     mailbox, since = prepare_mailbox(
         client, email=email, domain=domain, expires_hours=expires_hours
     )
     log(f"本次邮箱：{mailbox.email} (id={mailbox.id or 'new'})")
+
+    provisioned: ProvisionedProxy | None = None
+    if pool is not None:
+        provisioned = pool.provision(mailbox.email)
+        proxy = provisioned.url
+        log(f"已在节点 {provisioned.node_name} 开专属 socks5"
+            f"（inbound={provisioned.inbound_id}）。")
 
     child = client.create_child_key(
         email=mailbox.email, expires_at=mailbox.expires_at
@@ -274,6 +300,15 @@ def run(
             password=password,
             poll_client=poll_client,
             mail_key=child.plaintext if child else "",
+            proxy_meta=(
+                {
+                    "node": provisioned.node_name,
+                    "inbound_id": provisioned.inbound_id,
+                    "expiry_ms": provisioned.expiry_ms,
+                }
+                if provisioned
+                else None
+            ),
         )
     except BaseException:
         # run_browser 抛异常时这里拿不到它内部的 account 变量，没有轻量通道能
@@ -286,11 +321,19 @@ def run(
         if child:
             client.delete_key(child.id)
             log("注册中断，已撤销本次派生的子 key。")
+        if pool is not None and provisioned is not None:
+            pool.revoke(provisioned)
+            log("注册中断，已撤销本次开的专属代理。")
         raise
 
     if child and not (account and account.get("sessionKey")):
         client.delete_key(child.id)
         log("注册未成功，已撤销本次派生的子 key。")
+    if pool is not None and provisioned is not None and not (
+        account and account.get("sessionKey")
+    ):
+        pool.revoke(provisioned)
+        log("注册未成功，已撤销本次开的专属代理。")
 
     log("完成。")
     banner(f"邮箱：{mailbox.email}")
