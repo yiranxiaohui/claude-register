@@ -1,4 +1,4 @@
-"""账号导出：/api/accounts 携带 line 导出行、/api/accounts/export 全量下载。"""
+"""账号导出：/api/accounts 携带 text 导出块、/api/accounts/export 全量下载。"""
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
@@ -31,15 +31,31 @@ def _seed(app):
     conn.commit()
 
 
-def test_accounts_rows_include_export_line(tmp_path):
+TEXT_A = (
+    "email：a@x.com\n"
+    "sessionkey：sk-ant-a\n"
+    "proxy：socks5://p:1\n"
+    "mailUrl：https://mail\n"
+    "mailKey：mk-a"
+)
+TEXT_B = (
+    "email：b@x.com\n"
+    "sessionkey：sk-ant-b\n"
+    "proxy：\n"
+    "mailUrl：\n"
+    "mailKey："
+)
+
+
+def test_accounts_rows_include_export_text(tmp_path):
     app = _app(tmp_path)
     _seed(app)
     c = TestClient(app)
     c.post("/api/login", json={"password": "pw"})
     rows = c.get("/api/accounts").json()
     by_email = {r["email"]: r for r in rows}
-    assert by_email["a@x.com"]["line"] == "a@x.com----pw-a----sk-ant-a----socks5://p:1----mk-a"
-    assert by_email["b@x.com"]["line"] == "b@x.com----pw-b----sk-ant-b--------"
+    assert by_email["a@x.com"]["text"] == TEXT_A
+    assert by_email["b@x.com"]["text"] == TEXT_B
 
 
 def test_export_requires_auth(tmp_path):
@@ -57,7 +73,7 @@ def test_export_all_accounts_txt(tmp_path):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/plain")
     assert "attachment" in r.headers.get("content-disposition", "")
-    lines = r.text.strip().splitlines()
-    assert "a@x.com----pw-a----sk-ant-a----socks5://p:1----mk-a" in lines
-    assert "b@x.com----pw-b----sk-ant-b--------" in lines
-    assert len(lines) == 2
+    blocks = r.text.strip().split("\n\n")
+    assert TEXT_A in blocks
+    assert TEXT_B in blocks
+    assert len(blocks) == 2

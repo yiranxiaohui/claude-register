@@ -147,15 +147,15 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
 
         return EventSourceResponse(gen())
 
-    def _account_line(row: dict) -> str:
-        """与落盘 account.txt 同源的五段导出行。"""
+    def _account_text(row: dict) -> str:
+        """与落盘 account.txt 同源的带标签导出块。"""
         return AccountRecord(
             email=row.get("email") or "",
-            password=row.get("password") or "",
             sessionKey=row.get("session_key") or "",
             proxy=row.get("proxy") or "",
             mail_key=row.get("mail_key") or "",
-        ).line_export()
+            mail_base_url=row.get("mail_base_url") or "",
+        ).text_export()
 
     def _account_rows() -> list[dict]:
         rows = db.list_accounts(state.conn)
@@ -175,11 +175,13 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
 
     @app.get("/api/accounts")
     def accounts(_=Depends(require_auth)):
-        return [{**r, "line": _account_line(r)} for r in _account_rows()]
+        return [{**r, "text": _account_text(r)} for r in _account_rows()]
 
     @app.get("/api/accounts/export")
     def accounts_export(_=Depends(require_auth)):
-        text = "".join(_account_line(r) + "\n" for r in _account_rows())
+        text = "\n\n".join(_account_text(r) for r in _account_rows())
+        if text:
+            text += "\n"
         return Response(
             text,
             media_type="text/plain; charset=utf-8",

@@ -117,7 +117,7 @@ export default function Dashboard() {
   }
 
   async function copyLine(acct) {
-    const text = acct.line || acct.email;
+    const text = acct.text || acct.email;
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);

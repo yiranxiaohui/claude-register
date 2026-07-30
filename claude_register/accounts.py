@@ -43,15 +43,15 @@ class AccountRecord:
             data["extra"] = self.extra
         return data
 
-    def line_export(self) -> str:
-        """常见账号导出格式:email----password----sessionKey----proxy----mailKey"""
-        return "----".join(
+    def text_export(self) -> str:
+        """带标签的多行导出块,固定五行,空值留空保持结构稳定。"""
+        return "\n".join(
             [
-                self.email or "",
-                self.password or "",
-                self.sessionKey or "",
-                self.proxy or "",
-                self.mail_key or "",
+                f"email：{self.email or ''}",
+                f"sessionkey：{self.sessionKey or ''}",
+                f"proxy：{self.proxy or ''}",
+                f"mailUrl：{self.mail_base_url or ''}",
+                f"mailKey：{self.mail_key or ''}",
             ]
         )
 
@@ -81,10 +81,10 @@ def save_account_record(
         fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
     written["jsonl"] = jsonl
 
-    # 同步一份易复制的文本行
+    # 同步一份易复制的文本块，块之间空行分隔
     txtl = jsonl.with_suffix(".txt")
     with txtl.open("a", encoding="utf-8") as fh:
-        fh.write(record.line_export() + "\n")
+        fh.write(record.text_export() + "\n\n")
     written["txt"] = txtl
 
     if output_dir is not None:
@@ -97,7 +97,7 @@ def save_account_record(
         )
         written["account_json"] = account_json
         account_line = out / "account.txt"
-        account_line.write_text(record.line_export() + "\n", encoding="utf-8")
+        account_line.write_text(record.text_export() + "\n", encoding="utf-8")
         written["account_txt"] = account_line
 
     sk = record.sessionKey or ""
