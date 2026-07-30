@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 
+import httpx
 import pytest
 
 from claude_register.proxy_pool import (
@@ -27,6 +28,8 @@ class FakeXui:
     def list_inbounds(self):
         if self.spec.get("down"):
             raise XuiError("node down")
+        if "raise" in self.spec:
+            raise self.spec["raise"]
         return self.spec.get("inbounds", [])
 
     def create_socks_inbound(self, user, password, port, expiry_ms, remark):
@@ -125,6 +128,23 @@ def test_provision_raises_when_all_nodes_fail():
         pool.provision("x@mail.test")
 
 
+def test_provision_falls_over_to_next_node_on_httpx_error():
+    specs = {"bad": {"raise": httpx.ConnectError("boom")},
+             "good": {"inbounds": [], "last_remark": ""}}
+    # shuffle 恒等 → "bad" 仍排第一；httpx 网络错误也应触发 failover 到 good
+    pool = _pool([_node("n1", "bad"), _node("n2", "good")], specs,
+                 rng=ScriptedRandom([45005]))
+    got = pool.provision("x@mail.test")
+    assert got.node_name == "n2"
+
+
+def test_provision_raises_pool_error_when_only_node_has_httpx_error():
+    specs = {"bad": {"raise": httpx.ConnectError("boom")}}
+    pool = _pool([_node("n1", "bad")], specs)
+    with pytest.raises(ProxyPoolError):
+        pool.provision("x@mail.test")
+
+
 def test_revoke_deletes_on_matching_node():
     specs = {"u1": {"inbounds": [], "last_remark": ""}}
     pool = _pool([_node("n1", "u1")], specs)
@@ -144,3 +164,16 @@ def test_cleanup_expired_deletes_only_expired_reg_inbounds():
     res = pool.cleanup_expired()
     assert res == {"n1": 1}
     assert specs["u1"]["deleted"] == [1]
+
+
+def test_cleanup_expired_continues_past_httpx_error_on_one_node():
+    specs = {
+        "bad": {"raise": httpx.ConnectError("boom")},
+        "good": {"inbounds": [
+            {"id": 1, "remark": "reg:a@m", "expiryTime": 500},  # 已过期
+        ], "last_remark": ""},
+    }
+    pool = _pool([_node("n1", "bad"), _node("n2", "good")], specs, now_ms=1_000)
+    res = pool.cleanup_expired()
+    assert res == {"n1": 0, "n2": 1}
+    assert specs["good"]["deleted"] == [1]

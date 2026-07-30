@@ -106,10 +106,25 @@ def test_xui_node_blank_password_keeps_existing(tmp_path):
     save_config(p, {"xui_nodes": [{"name": "usa-4", "base_url": "https://x",
                                    "username": "u", "password": "secret",
                                    "proxy_host": ""}]})
-    # 二次保存：同名节点密码传 REDACTED（面板脱敏回传）→ 应沿用旧密码
-    save_config(p, {"xui_nodes": [{"name": "usa-4", "base_url": "https://x2",
+    # 二次保存：base_url 不变（同一节点），密码传 REDACTED（面板脱敏回传）→ 应沿用旧密码
+    save_config(p, {"xui_nodes": [{"name": "usa-4", "base_url": "https://x",
                                    "username": "u2", "password": REDACTED,
                                    "proxy_host": ""}]})
     cfg = load_config(p)
     assert cfg.xui_nodes[0]["password"] == "secret"
-    assert cfg.xui_nodes[0]["base_url"] == "https://x2"  # 其余字段照常更新
+    assert cfg.xui_nodes[0]["username"] == "u2"  # 其余字段照常更新
+
+
+def test_xui_node_changed_base_url_does_not_carry_password(tmp_path):
+    p = tmp_path / "config.yaml"
+    save_config(p, {"xui_nodes": [{"name": "usa-4", "base_url": "https://x",
+                                   "username": "u", "password": "secret",
+                                   "proxy_host": ""}]})
+    # 节点改指向另一个面板（base_url 变了），密码传 REDACTED → 不应沿用旧密码，
+    # 因为这已经是"指向不同面板"，需要重新输入凭据。
+    save_config(p, {"xui_nodes": [{"name": "usa-4", "base_url": "https://x2",
+                                   "username": "u", "password": REDACTED,
+                                   "proxy_host": ""}]})
+    cfg = load_config(p)
+    assert cfg.xui_nodes[0]["password"] == ""
+    assert cfg.xui_nodes[0]["base_url"] == "https://x2"

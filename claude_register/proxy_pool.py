@@ -11,6 +11,8 @@ import string
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import httpx
+
 from claude_register.console import log
 from claude_register.xui import XuiClient, XuiError
 
@@ -84,7 +86,7 @@ class ProxyPool:
                 proxy = self._provision_on(client, node, used, expiry_ms, remark)
                 if proxy is not None:
                     return proxy
-            except XuiError as exc:  # 登录失败/列表失败 → 换下一台
+            except (XuiError, httpx.HTTPError) as exc:  # 登录失败/列表失败/网络不可达 → 换下一台
                 last_err = exc
                 log(f"节点 {node.name} 开号失败（{exc}），尝试下一台。")
         raise ProxyPoolError(f"所有节点均开号失败：{last_err}")
@@ -132,7 +134,7 @@ class ProxyPool:
                     if remark.startswith("reg:") and 0 < exp < now:
                         client.delete_inbound(int(ib["id"]))
                         deleted += 1
-            except XuiError as exc:
+            except (XuiError, httpx.HTTPError) as exc:
                 log(f"清理节点 {node.name} 过期 inbound 失败（{exc}），跳过。")
             result[node.name] = deleted
         return result

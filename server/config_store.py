@@ -95,12 +95,12 @@ def save_config(path: Path, updates: dict) -> Config:
     cfg = replace(cfg, **{k: v for k, v in clean.items() if k in _FIELD_MAP})
     cfg = replace(cfg, **xui_scalar)
     if incoming_nodes is not None:
-        old_by_name = {n["name"]: n for n in cfg.xui_nodes}
+        old_by_base = {n["base_url"]: n for n in cfg.xui_nodes}
         merged = []
         for raw_node in incoming_nodes:
             node = _load_node(raw_node)
             if node["password"] in ("", REDACTED):
-                node["password"] = old_by_name.get(node["name"], {}).get("password", "")
+                node["password"] = old_by_base.get(node["base_url"], {}).get("password", "")
             merged.append(node)
         cfg = replace(cfg, xui_nodes=tuple(merged))
     out: dict = {"panel": {}, "anymail": {}, "register": {}, "xui": {}}

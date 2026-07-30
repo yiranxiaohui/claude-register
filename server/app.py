@@ -13,7 +13,7 @@ from sse_starlette.sse import EventSourceResponse
 from claude_register import flow
 from claude_register.accounts import AccountRecord
 from claude_register.proxy_pool import ProxyPool, XuiNode
-from claude_register.xui import XuiClient, XuiError
+from claude_register.xui import XuiClient
 from server import auth, db
 from server.config_store import save_config, to_redacted_dict
 from server.deps import AppState, default_now
