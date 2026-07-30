@@ -64,8 +64,15 @@ def run_browser(
     code_timeout: float,
     proxy: str | None = None,
     password: str = "",
+    poll_client: AnyMailClient | None = None,
+    mail_key: str = "",
 ) -> dict | None:
-    """跑浏览器登录/建号。成功拿到 sessionKey 时返回账号 dict，否则 None。"""
+    """跑浏览器登录/建号。成功拿到 sessionKey 时返回账号 dict，否则 None。
+
+    poll_client：接码轮询用的客户端（子 key）；None 时回落用 client（父 key）。
+    mail_key：随账号导出的子 key 明文；降级时空串，父 key 绝不写进导出。
+    """
+    poll = poll_client or client
     account: dict | None = None
     display_name = default_display_name(mailbox.email)
 
@@ -86,6 +93,8 @@ def run_browser(
             proxy=proxy or "",
             display_name=display_name,
             mailbox_id=str(mailbox.id or ""),
+            mail_key=mail_key,
+            mail_base_url=client.base_url if mail_key else "",
         )
         paths = save_account_record(record, output_dir=_output_dir.get())
         account = record.to_dict()
@@ -117,14 +126,14 @@ def run_browser(
             link: str | None = None
             code: str | None = None
             if code_timeout > 0:
-                link = client.poll_magic_link(
+                link = poll.poll_magic_link(
                     to=mailbox.email, since=since, timeout=link_timeout
                 )
                 if link is None:
                     # 退一步试试 6 位码——Claude 的 UI 里存在这条路径。超时从
                     # --login-timeout 的总预算里扣除，不能在它之外再固定多等一段。
                     log(f"未收到登录链接，改试 6 位验证码（最多 {fallback_timeout:.0f}s）。")
-                    code = client.poll_code(
+                    code = poll.poll_code(
                         to=mailbox.email, since=since, timeout=fallback_timeout
                     )
             else:
@@ -172,7 +181,7 @@ def run_browser(
                 else:
                     log("既没收到登录链接，也没收到验证码。")
                     screenshot(page, "no_mail.png")
-                    _report_manual_fallback(mailbox, client)
+                    _report_manual_fallback(mailbox, poll)
             except Exception as exc:
                 # 到这一步，链接/验证码已经从邮箱里取出来了——而且不能重新获取
                 # （魔术链接一次性；邮箱不会再收到新邮件）。哪怕这里的收尾动作
@@ -233,15 +242,41 @@ def run(
     )
     log(f"本次邮箱：{mailbox.email} (id={mailbox.id or 'new'})")
 
-    account = run_browser(
-        client,
-        mailbox,
-        since,
-        auto_login=auto_login,
-        code_timeout=code_timeout,
-        proxy=proxy,
-        password=password,
+    child = client.create_child_key(
+        email=mailbox.email, expires_at=mailbox.expires_at
     )
+    if child:
+        poll_client = AnyMailClient(
+            base_url=client.base_url,
+            api_key=child.plaintext,
+            domain=client.domain or None,
+            code_regex=client.code_regex or None,
+        )
+        log("已派生本邮箱专用子 key（仅 emails:read），接码轮询改用子 key。")
+    else:
+        poll_client = client
+
+    try:
+        account = run_browser(
+            client,
+            mailbox,
+            since,
+            auto_login=auto_login,
+            code_timeout=code_timeout,
+            proxy=proxy,
+            password=password,
+            poll_client=poll_client,
+            mail_key=child.plaintext if child else "",
+        )
+    except BaseException:
+        if child:
+            client.delete_key(child.id)
+            log("注册中断，已撤销本次派生的子 key。")
+        raise
+
+    if child and not (account and account.get("sessionKey")):
+        client.delete_key(child.id)
+        log("注册未成功，已撤销本次派生的子 key。")
 
     log("完成。")
     banner(f"邮箱：{mailbox.email}")
