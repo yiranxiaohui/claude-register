@@ -55,3 +55,24 @@ def test_register_proxy_not_redacted(tmp_path):
     save_config(path, {"register_proxy": "http://user:pass@1.2.3.4:8080"})
     d = to_redacted_dict(load_config(path))
     assert d["register_proxy"] == "http://user:pass@1.2.3.4:8080"
+
+
+def test_takeover_defaults(tmp_path):
+    from server.config_store import load_config
+    cfg = load_config(tmp_path / "nope.yaml")  # 文件不存在→默认值
+    assert cfg.takeover_enabled is True
+    assert cfg.takeover_idle_timeout_min == 15
+
+
+def test_takeover_roundtrip(tmp_path):
+    from server.config_store import load_config, save_config
+    p = tmp_path / "config.yaml"
+    save_config(p, {"takeover_enabled": False, "takeover_idle_timeout_min": 30})
+    cfg = load_config(p)
+    assert cfg.takeover_enabled is False
+    assert cfg.takeover_idle_timeout_min == 30
+    # 落盘结构在 takeover 段
+    import yaml
+    raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert raw["takeover"]["enabled"] is False
+    assert raw["takeover"]["idle_timeout_min"] == 30

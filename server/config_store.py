@@ -21,6 +21,8 @@ class Config:
     register_auto_login: bool = True
     register_code_regex: str = ""
     register_proxy: str = ""
+    takeover_enabled: bool = True
+    takeover_idle_timeout_min: int = 15
 
 
 def load_config(path: Path) -> Config:
@@ -30,6 +32,7 @@ def load_config(path: Path) -> Config:
     panel = raw.get("panel", {}) or {}
     anymail = raw.get("anymail", {}) or {}
     reg = raw.get("register", {}) or {}
+    tk = raw.get("takeover", {}) or {}
     return Config(
         panel_password=str(panel.get("password", "") or ""),
         panel_port=int(panel.get("port", 8790)),
@@ -41,6 +44,8 @@ def load_config(path: Path) -> Config:
         register_auto_login=bool(reg.get("auto_login", True)),
         register_code_regex=str(reg.get("code_regex", "") or ""),
         register_proxy=str(reg.get("proxy", "") or ""),
+        takeover_enabled=bool(tk.get("enabled", True)),
+        takeover_idle_timeout_min=int(tk.get("idle_timeout_min", 15)),
     )
 
 
@@ -55,6 +60,8 @@ _FIELD_MAP = {
     "register_auto_login": ("register", "auto_login"),
     "register_code_regex": ("register", "code_regex"),
     "register_proxy": ("register", "proxy"),
+    "takeover_enabled": ("takeover", "enabled"),
+    "takeover_idle_timeout_min": ("takeover", "idle_timeout_min"),
 }
 
 
@@ -66,7 +73,7 @@ def save_config(path: Path, updates: dict) -> Config:
         if secret in clean and clean[secret] in ("", REDACTED, None):
             clean.pop(secret)
     cfg = replace(cfg, **{k: v for k, v in clean.items() if k in _FIELD_MAP})
-    out: dict = {"panel": {}, "anymail": {}, "register": {}}
+    out: dict = {"panel": {}, "anymail": {}, "register": {}, "takeover": {}}
     for field, (section, key) in _FIELD_MAP.items():
         out[section][key] = getattr(cfg, field)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
