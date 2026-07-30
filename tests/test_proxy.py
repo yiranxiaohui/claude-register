@@ -512,3 +512,19 @@ def test_relay_launch_failure_does_not_mention_camoufox_fetch(monkeypatch):
 
     assert "camoufox fetch" not in str(exc.value)
     assert "Xvfb" not in str(exc.value)
+
+
+def test_build_kwargs_no_proxy():
+    from claude_register.browser import build_camoufox_kwargs
+    kwargs, relay, geoip = build_camoufox_kwargs(None)
+    assert "proxy" not in kwargs
+    assert relay is None
+    assert geoip is True
+
+
+def test_build_kwargs_plain_proxy():
+    from claude_register.browser import build_camoufox_kwargs
+    kwargs, relay, geoip = build_camoufox_kwargs("http://1.2.3.4:8080")
+    assert kwargs["proxy"] == {"server": "http://1.2.3.4:8080"}
+    assert relay is None          # 无认证不需要中继
+    assert geoip is True

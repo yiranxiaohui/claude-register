@@ -8,6 +8,7 @@ from pathlib import Path
 from server import db
 from server.config_store import Config, load_config
 from server.runner import Runner
+from server.takeover import TakeoverManager
 
 
 def default_now() -> str:
@@ -29,6 +30,7 @@ class AppState:
         else:
             self.secret = secrets.token_hex(32)
             secret_path.write_text(self.secret, encoding="utf-8")
+        self.takeover = TakeoverManager(now_fn=now_fn)
 
     def config(self) -> Config:
         return load_config(self.config_path)

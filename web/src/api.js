@@ -66,4 +66,16 @@ export const api = {
 
   xuiCleanup: () =>
     fetch("/api/xui/cleanup", { method: "POST" }).then(j),
+
+  takeoverStart: (email) =>
+    fetch("/api/takeover/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email }),
+    }).then(j),
+
+  takeoverStop: () =>
+    fetch("/api/takeover/stop", { method: "POST" }).then(j),
+
+  takeoverStatus: () => fetch("/api/takeover").then(j),
 };

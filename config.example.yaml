@@ -10,3 +10,6 @@ register:
   login_timeout: 120
   auto_login: true
   code_regex: ""
+takeover:
+  enabled: true          # 是否允许 noVNC 免密接管
+  idle_timeout_min: 15   # 接管会话空闲多少分钟后自动结束
