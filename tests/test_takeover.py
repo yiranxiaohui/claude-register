@@ -100,3 +100,16 @@ def test_idle_timeout_auto_stops():
             break
         threading.Event().wait(0.02)
     assert m.status()["running"] is False
+
+
+def test_wait_x_socket_times_out_fast(tmp_path):
+    from server.takeover_browser import wait_x_socket
+    import pytest
+    with pytest.raises(TimeoutError):
+        wait_x_socket(":100", timeout=0.2, poll=0.02, sock_dir=str(tmp_path))
+
+
+def test_wait_x_socket_succeeds_when_present(tmp_path):
+    from server.takeover_browser import wait_x_socket
+    (tmp_path / "X100").write_text("")  # 伪造 X socket 文件
+    wait_x_socket(":100", timeout=0.5, poll=0.02, sock_dir=str(tmp_path))  # 不抛即通过
