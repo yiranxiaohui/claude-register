@@ -216,3 +216,66 @@ def test_bootstrap_empty_password_blocks_runs(tmp_path):
     assert c.put("/api/config", json={"panel_password": "newpw"}).status_code == 200
     # 设好密码后无 cookie 再访问配置 → 401
     assert c.get("/api/config").status_code == 401
+
+
+def _authed(tmp_path, extra=None):
+    """建库+登录，返回已带 cookie 的 TestClient（复用 test_app 的 _client）。"""
+    from server.config_store import save_config
+
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw", **(extra or {})})
+    c = _client(tmp_path)
+    c.post("/api/login", json={"password": "pw"})
+    return c
+
+
+def test_xui_test_endpoint_ok(tmp_path, monkeypatch):
+    import server.app as appmod
+
+    class FakeXui:
+        def __init__(self, base_url, username, password, **kw):
+            self.base_url = base_url
+        def list_inbounds(self):
+            return [{"id": 1}, {"id": 2}]
+
+    monkeypatch.setattr(appmod, "XuiClient", FakeXui)
+    c = _authed(tmp_path)
+    r = c.post("/api/xui/test", json={
+        "base_url": "https://n.test:2053", "username": "u", "password": "p"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "inbound_count": 2}
+
+
+def test_xui_test_endpoint_reports_failure(tmp_path, monkeypatch):
+    import server.app as appmod
+    from claude_register.xui import XuiError
+
+    class FakeXui:
+        def __init__(self, *a, **k): ...
+        def list_inbounds(self):
+            raise XuiError("bad creds")
+
+    monkeypatch.setattr(appmod, "XuiClient", FakeXui)
+    c = _authed(tmp_path)
+    r = c.post("/api/xui/test", json={
+        "base_url": "https://n.test:2053", "username": "u", "password": "x"})
+    assert r.status_code == 400
+    assert "bad creds" in r.json()["detail"]
+
+
+def test_xui_cleanup_endpoint(tmp_path, monkeypatch):
+    import server.app as appmod
+
+    class FakePool:
+        def __init__(self, *a, **k): ...
+        def cleanup_expired(self):
+            return {"n1": 3, "n2": 0}
+
+    monkeypatch.setattr(appmod, "ProxyPool", FakePool)
+    c = _authed(tmp_path, extra={
+        "xui_enabled": True,
+        "xui_nodes": [{"name": "n1", "base_url": "https://n1", "username": "u",
+                       "password": "p", "proxy_host": ""}],
+    })
+    r = c.post("/api/xui/cleanup")
+    assert r.status_code == 200
+    assert r.json() == {"results": {"n1": 3, "n2": 0}, "total": 3}
