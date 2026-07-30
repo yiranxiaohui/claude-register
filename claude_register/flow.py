@@ -196,7 +196,13 @@ def run_browser(
                     pass
 
         finally:
-            context.close()
+            try:
+                context.close()
+            except Exception as exc:
+                # 账号可能在上面 _capture() 里已经落盘成功——context.close() 本身
+                # 崩溃（比如目标进程已死）绝不能把这次已经拿到的 account 变成异常，
+                # 让外层 run() 误判成「未保存」而去撤销刚导出的子 key。
+                log(f"关闭浏览器上下文出错（{exc}），忽略。")
             # browser 的关闭交给 browser_session 的上下文退出，这里不重复关。
     return account
 
@@ -251,6 +257,7 @@ def run(
             api_key=child.plaintext,
             domain=client.domain or None,
             code_regex=client.code_regex or None,
+            timeout=client.timeout,
         )
         log("已派生本邮箱专用子 key（仅 emails:read），接码轮询改用子 key。")
     else:
@@ -269,6 +276,13 @@ def run(
             mail_key=child.plaintext if child else "",
         )
     except BaseException:
+        # run_browser 抛异常时这里拿不到它内部的 account 变量，没有轻量通道能
+        # 分辨「账号是否已落盘」，所以这条回收路径假设：run_browser 一旦异常
+        # 退出就等于未保存成功。这个假设的主要反例（_capture 已成功但随后
+        # context.close() 崩溃）已经在 run_browser 的 finally 里用 try/except
+        # 挡掉——那种情况下 run_browser 会正常返回 account 而不再抛到这里。
+        # 引入 nonlocal/闭包信号把「已保存」状态跨异常传出来目前不值得为这一个
+        # 边缘场景增加复杂度。
         if child:
             client.delete_key(child.id)
             log("注册中断，已撤销本次派生的子 key。")

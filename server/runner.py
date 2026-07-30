@@ -97,6 +97,8 @@ class Runner:
                     ),
                     display_name=str(result.get("display_name") or ""),
                     created_at=self.now_fn(),
+                    mail_key=str(result.get("mail_key") or ""),
+                    mail_base_url=str(result.get("mail_base_url") or ""),
                 )
                 sink(
                     f"账号入库：{acct_email} status={acct_status} "

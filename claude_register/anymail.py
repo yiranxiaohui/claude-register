@@ -515,7 +515,7 @@ class AnyMailClient:
                     headers=self._headers(content_type=True),
                     json=body,
                 )
-        except httpx.HTTPError as exc:
+        except Exception as exc:  # noqa: BLE001 — 任何失败都只降级，不中断注册
             log(f"派生子 key 请求失败({exc}),降级:轮询继续用主 key。")
             return None
 
@@ -536,7 +536,10 @@ class AnyMailClient:
         key_id = str(key.get("id") or "") if isinstance(key, dict) else ""
         plaintext = str(data.get("plaintext") or "") if isinstance(data, dict) else ""
         if not key_id or not plaintext:
-            log(f"派生子 key 响应异常:{data!r},降级:轮询继续用主 key。")
+            safe_data = dict(data) if isinstance(data, dict) else data
+            if isinstance(safe_data, dict) and safe_data.get("plaintext"):
+                safe_data["plaintext"] = "ak_…redacted"
+            log(f"派生子 key 响应异常:{safe_data!r},降级:轮询继续用主 key。")
             return None
         return ChildKey(id=key_id, plaintext=plaintext)
 

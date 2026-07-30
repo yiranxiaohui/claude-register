@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS accounts (
   email TEXT UNIQUE, domain TEXT, created_at TEXT, expires_at TEXT,
   mailbox_id TEXT, last_run_id INTEGER, status TEXT,
-  password TEXT, session_key TEXT, proxy TEXT, display_name TEXT
+  password TEXT, session_key TEXT, proxy TEXT, display_name TEXT,
+  mail_key TEXT, mail_base_url TEXT
 );
 """
 
@@ -22,11 +23,13 @@ _ACCOUNT_EXTRA_COLS = (
     ("session_key", "TEXT"),
     ("proxy", "TEXT"),
     ("display_name", "TEXT"),
+    ("mail_key", "TEXT"),
+    ("mail_base_url", "TEXT"),
 )
 
 
 def _migrate_accounts(conn: sqlite3.Connection) -> None:
-    """旧库补列：password / session_key / proxy / display_name。"""
+    """旧库补列：password / session_key / proxy / display_name / mail_key / mail_base_url。"""
     existing = {
         str(row[1])
         for row in conn.execute("PRAGMA table_info(accounts)").fetchall()
@@ -101,16 +104,19 @@ def upsert_account(
     proxy: str = "",
     display_name: str = "",
     created_at: str = "",
+    mail_key: str = "",
+    mail_base_url: str = "",
 ) -> None:
     conn.execute(
         "INSERT INTO accounts(email,domain,created_at,expires_at,mailbox_id,last_run_id,status,"
-        "password,session_key,proxy,display_name) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+        "password,session_key,proxy,display_name,mail_key,mail_base_url) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(email) DO UPDATE SET domain=excluded.domain, "
         "expires_at=excluded.expires_at, mailbox_id=excluded.mailbox_id, "
         "last_run_id=excluded.last_run_id, status=excluded.status, "
         "password=excluded.password, session_key=excluded.session_key, "
-        "proxy=excluded.proxy, display_name=excluded.display_name",
+        "proxy=excluded.proxy, display_name=excluded.display_name, "
+        "mail_key=excluded.mail_key, mail_base_url=excluded.mail_base_url",
         (
             email,
             domain,
@@ -123,6 +129,8 @@ def upsert_account(
             session_key or "",
             proxy or "",
             display_name or "",
+            mail_key or "",
+            mail_base_url or "",
         ),
     )
     conn.commit()

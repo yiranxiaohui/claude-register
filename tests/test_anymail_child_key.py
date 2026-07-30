@@ -82,6 +82,39 @@ def test_create_child_key_degrades_on_malformed_response(client):
     assert client.create_child_key(email="a@mail.test", expires_at=None) is None
 
 
+def test_create_child_key_degrades_on_unexpected_exception(client, monkeypatch):
+    """请求阶段抛出非 httpx.HTTPError 的异常(比如底层库/编码错误)也必须降级,
+    而不是让 create_child_key 本身把注册流程带崩——契约是「任何失败都返回 None」。"""
+
+    def boom(*a, **kw):
+        raise ValueError("意外错误,不是 httpx.HTTPError")
+
+    monkeypatch.setattr(httpx.Client, "post", boom)
+    assert client.create_child_key(email="a@mail.test", expires_at=None) is None
+
+
+@respx.mock
+def test_create_child_key_malformed_response_log_redacts_plaintext(client):
+    """响应异形但仍带了 plaintext(比如 key.id 缺失)时,日志不能把明文子 key 打出来。"""
+    from claude_register import console
+
+    respx.post(KEYS).mock(
+        return_value=httpx.Response(
+            201, json={"ok": True, "key": {}, "plaintext": "ak_leaked_secret"}
+        )
+    )
+    captured: list[str] = []
+    token = console.set_sink(captured.append)
+    try:
+        assert client.create_child_key(email="a@mail.test", expires_at=None) is None
+    finally:
+        console.reset_sink(token)
+
+    joined = "\n".join(captured)
+    assert "ak_leaked_secret" not in joined, f"日志泄露了子 key 明文:{joined}"
+    assert "redacted" in joined
+
+
 @respx.mock
 def test_delete_key_200_and_404_silent(client):
     respx.delete(f"{KEYS}/kid-1").mock(

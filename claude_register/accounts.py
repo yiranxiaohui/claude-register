@@ -44,7 +44,7 @@ class AccountRecord:
         return data
 
     def line_export(self) -> str:
-        """常见账号导出格式：email----password----sessionKey----proxy----mailKey"""
+        """常见账号导出格式:email----password----sessionKey----proxy----mailKey"""
         return "----".join(
             [
                 self.email or "",

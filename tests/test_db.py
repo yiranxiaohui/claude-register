@@ -57,6 +57,58 @@ def test_upsert_account_session_fields(tmp_path):
     assert row["display_name"] == "Alex"
 
 
+def test_upsert_account_mail_key_fields(tmp_path):
+    """面板 /api/accounts 从这张表出数据，落库必须带上 mail_key/mail_base_url，
+    否则 web 端注册出来的账号永远拿不到子 key。"""
+    conn = db.init_db(tmp_path / "t.db")
+    db.upsert_account(
+        conn,
+        "a@x.com",
+        "x.com",
+        None,
+        "m1",
+        1,
+        "success",
+        session_key="sk-ant-1",
+        mail_key="ak_child",
+        mail_base_url="https://mail.test",
+    )
+    row = db.list_accounts(conn)[0]
+    assert row["mail_key"] == "ak_child"
+    assert row["mail_base_url"] == "https://mail.test"
+
+
+def test_upsert_account_mail_key_defaults_empty(tmp_path):
+    conn = db.init_db(tmp_path / "t.db")
+    db.upsert_account(conn, "a@x.com", "x.com", None, "m1", 1, "success")
+    row = db.list_accounts(conn)[0]
+    assert row["mail_key"] == ""
+    assert row["mail_base_url"] == ""
+
+
+def test_migrate_adds_mail_key_columns(tmp_path):
+    """旧库只有 session 相关列（无 mail_key/mail_base_url）时 init_db 要补齐。"""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE accounts (
+          email TEXT UNIQUE, domain TEXT, created_at TEXT, expires_at TEXT,
+          mailbox_id TEXT, last_run_id INTEGER, status TEXT,
+          password TEXT, session_key TEXT, proxy TEXT, display_name TEXT
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    conn2 = db.init_db(path)
+    cols = {r[1] for r in conn2.execute("PRAGMA table_info(accounts)").fetchall()}
+    assert "mail_key" in cols
+    assert "mail_base_url" in cols
+
+
 def test_migrate_adds_session_columns(tmp_path):
     """旧库只有基础列时 init_db 会补 session 相关列。"""
     import sqlite3

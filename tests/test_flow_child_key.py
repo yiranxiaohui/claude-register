@@ -82,6 +82,24 @@ def test_run_polls_with_child_key_and_keeps_it_on_success(wired, monkeypatch):
     assert wired["deleted"] == []  # 成功：子 key 随账号交付，不回收
 
 
+def test_child_key_poll_client_inherits_parent_timeout(wired, monkeypatch):
+    """子 key 客户端不能悄悄退回 httpx 默认 30s——父 client 配了多久就该配多久，
+    否则子 key 轮询的超时行为会和父 key 不一致。"""
+    _mint_ok(monkeypatch)
+    wired["browser_result"] = {"sessionKey": "sk-1"}
+
+    seen_timeout = {}
+    orig_init = anymail.AnyMailClient.__init__
+
+    def spying_init(self, **kw):
+        orig_init(self, **kw)
+        seen_timeout[kw.get("api_key")] = self.timeout
+
+    monkeypatch.setattr(anymail.AnyMailClient, "__init__", spying_init)
+    flow.run(config=_cfg())
+    assert seen_timeout["ak_child"] == seen_timeout["ak_parent"]
+
+
 def test_run_degrades_to_parent_key_without_export(wired, monkeypatch):
     _mint_fail(monkeypatch)
     wired["browser_result"] = {"sessionKey": "sk-1"}

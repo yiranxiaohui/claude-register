@@ -43,6 +43,34 @@ def test_start_runs_flow_and_records_success(tmp_path):
     assert accts[0]["proxy"] == "socks5://proxy:1"
 
 
+def test_start_runs_flow_and_records_mail_key(tmp_path):
+    """flow 返回的 mail_key/mail_base_url 必须落库，否则面板拿不到子 key。"""
+    conn = db.init_db(tmp_path / "t.db")
+    r = runner.Runner(conn, tmp_path, _now)
+
+    def fake_flow(*, email=None, domain=None, config=None, **kw):
+        return {
+            "email": email or "a@x.com",
+            "password": "",
+            "sessionKey": "sk-ant-from-test",
+            "proxy": "socks5://proxy:1",
+            "display_name": "Alex",
+            "mailbox_id": "mb1",
+            "mail_key": "ak_child",
+            "mail_base_url": "https://mail.test",
+        }
+
+    rid = r.start(Config(), email="a@x.com", flow_fn=fake_flow)
+    for _ in range(50):
+        if db.get_run(conn, rid)["status"] != "running":
+            break
+        time.sleep(0.05)
+    accts = db.list_accounts(conn)
+    assert len(accts) == 1
+    assert accts[0]["mail_key"] == "ak_child"
+    assert accts[0]["mail_base_url"] == "https://mail.test"
+
+
 def test_start_twice_is_busy(tmp_path):
     conn = db.init_db(tmp_path / "t.db")
     r = runner.Runner(conn, tmp_path, _now)
