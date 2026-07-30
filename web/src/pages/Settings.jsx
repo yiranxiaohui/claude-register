@@ -18,6 +18,15 @@ const FIELD_DEFS = [
     placeholder: "http://user:pass@host:port 或 socks5://host:port" },
 ];
 
+const XUI_FIELDS = [
+  { key: "xui_enabled", label: "启用 3x-ui 代理池", type: "checkbox" },
+  { key: "xui_expiry_days", label: "代理有效期（天）", type: "number" },
+  { key: "xui_port_min", label: "端口范围下限", type: "number" },
+  { key: "xui_port_max", label: "端口范围上限", type: "number" },
+];
+
+const EMPTY_NODE = { name: "", base_url: "", username: "", password: "", proxy_host: "" };
+
 export default function Settings() {
   const [form, setForm] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -64,6 +73,26 @@ export default function Settings() {
     }
   }
 
+  async function testNode(node) {
+    setMessage(""); setError("");
+    try {
+      const r = await api.xuiTest(node);
+      setMessage(`节点连接成功，现有 ${r.inbound_count} 个 inbound`);
+    } catch (e) {
+      setError(`节点连接失败：${e.body?.detail || e.message}`);
+    }
+  }
+
+  async function cleanupExpired() {
+    setMessage(""); setError("");
+    try {
+      const r = await api.xuiCleanup();
+      setMessage(`已清理过期 inbound：共 ${r.total} 个`);
+    } catch {
+      setError("清理失败，请重试");
+    }
+  }
+
   if (loading) return <div className="empty-hint">加载中…</div>;
   if (!form) return <div className="error-msg">{error || "加载失败"}</div>;
 
@@ -100,6 +129,56 @@ export default function Settings() {
             )}
           </div>
         ))}
+
+        <fieldset className="settings-group">
+          <legend>3x-ui 代理池</legend>
+          {XUI_FIELDS.map((f) => (
+            <div className="form-field" key={f.key}>
+              <label className="field-label" htmlFor={f.key}>{f.label}</label>
+              {f.type === "checkbox" ? (
+                <input id={f.key} type="checkbox"
+                  checked={!!form[f.key]}
+                  onChange={(e) => setField(f.key, e.target.checked)} />
+              ) : (
+                <input id={f.key} className="input" type="number"
+                  value={form[f.key] ?? ""}
+                  onChange={(e) => setField(f.key, Number(e.target.value))} />
+              )}
+            </div>
+          ))}
+
+          <div className="nodes-table">
+            {(form.xui_nodes || []).map((node, i) => (
+              <div className="node-row" key={i}>
+                {["name", "base_url", "username", "password", "proxy_host"].map((k) => (
+                  <input key={k} className="input" placeholder={k}
+                    type={k === "password" ? "password" : "text"}
+                    value={node[k] ?? ""}
+                    onChange={(e) => {
+                      const nodes = [...form.xui_nodes];
+                      nodes[i] = { ...nodes[i], [k]: e.target.value };
+                      setField("xui_nodes", nodes);
+                    }} />
+                ))}
+                <button type="button" className="btn"
+                  onClick={() => testNode(node)}>测试</button>
+                <button type="button" className="btn btn-danger"
+                  onClick={() => {
+                    setField("xui_nodes",
+                      form.xui_nodes.filter((_, j) => j !== i));
+                  }}>删除</button>
+              </div>
+            ))}
+            <button type="button" className="btn"
+              onClick={() => setField("xui_nodes",
+                [...(form.xui_nodes || []), { ...EMPTY_NODE }])}>
+              + 添加节点
+            </button>
+            <button type="button" className="btn"
+              onClick={cleanupExpired}>清理过期 inbound</button>
+          </div>
+        </fieldset>
+
         {message && <div className="success-msg">{message}</div>}
         {error && <div className="error-msg">{error}</div>}
         <button className="btn btn-primary" type="submit" disabled={saving}>

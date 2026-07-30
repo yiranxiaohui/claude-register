@@ -240,6 +240,41 @@ code,
   color: var(--text-dim);
 }
 
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0;
+}
+
+.settings-group legend {
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.nodes-table {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.node-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.node-row .input {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
 /* Buttons */
 
 .btn {
@@ -289,6 +324,17 @@ code,
 .btn-small:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent-hover);
+}
+
+.btn-danger {
+  background: transparent;
+  color: #ef4444;
+  border: 1px solid #ef4444;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #ef4444;
+  color: #fff;
 }
 
 /* Messages */

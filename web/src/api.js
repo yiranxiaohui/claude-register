@@ -56,4 +56,14 @@ export const api = {
     fetch(`/api/accounts/${encodeURIComponent(email)}/rerun`, {
       method: "POST",
     }).then(j),
+
+  xuiTest: (node) =>
+    fetch("/api/xui/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(node),
+    }).then(j),
+
+  xuiCleanup: () =>
+    fetch("/api/xui/cleanup", { method: "POST" }).then(j),
 };
