@@ -11,6 +11,7 @@ from __future__ import annotations
 import socket
 import struct
 import threading
+import time
 
 import pytest
 
@@ -28,10 +29,19 @@ class CappedUpstream:
     记录同时在跑的隧道峰值，供断言「中继没有超订上游」。
     """
 
-    def __init__(self, username: str, password: str, *, cap: int, echo: bytes = b"OK"):
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        *,
+        cap: int,
+        hold: float = 0.0,
+        echo: bytes = b"OK",
+    ):
         self.username = username
         self.password = password
         self.echo = echo
+        self._hold = hold
         self._slot = threading.Semaphore(cap)
         self._active = 0
         self._max_active = 0
@@ -103,6 +113,9 @@ class CappedUpstream:
 
             conn.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
             payload = conn.recv(65535)
+            # 停一会儿再回，制造隧道重叠窗口，好让并发峰值测量有意义。
+            if self._hold:
+                time.sleep(self._hold)
             conn.sendall(self.echo + payload)
         except Exception:
             pass
@@ -177,6 +190,39 @@ def test_relay_caps_concurrent_upstream_and_all_succeed():
         assert len(results) == 6
         assert all(v == b"OK" + bytes([65 + i]) for i, v in results.items())
         assert up.max_active <= 2, f"中继不应超订上游，峰值并发 {up.max_active} > 2"
+    finally:
+        up.close()
+
+
+def test_relay_peak_upstream_concurrency_is_bounded_by_max_upstream():
+    """上游 cap 放宽到不设限（16），由中继的 max_upstream=3 独立决定峰值：
+    8 条并发下，上游同时在跑的隧道峰值必须恰好被闸在 3。
+
+    这条和上面那条互补——上面证「超订会失败」，这条直接量峰值,确保限流生效
+    而非靠假上游自己的 cap 兜底。"""
+    up = CappedUpstream("alice", "s3cret", cap=16, hold=0.15)
+    try:
+        with SocksRelay(
+            f"socks5://alice:s3cret@127.0.0.1:{up.port}", max_upstream=3
+        ) as relay:
+            errors: dict[int, Exception] = {}
+
+            def worker(i: int) -> None:
+                try:
+                    _connect_and_echo(
+                        relay.port, "example.com", 443, payload=bytes([65 + i])
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors[i] = exc
+
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=25)
+
+        assert not errors, f"排队通过不应失败：{errors}"
+        assert up.max_active == 3, f"中继应把上游并发闸在 3，实测峰值 {up.max_active}"
     finally:
         up.close()
 
