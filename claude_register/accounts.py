@@ -1,4 +1,4 @@
-﻿"""注册成功后的账号落盘：email / password / sessionKey / proxy。"""
+﻿"""注册成功后的账号落盘:email / password / sessionKey / proxy / mailKey。"""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ class AccountRecord:
     proxy: str = ""
     display_name: str = ""
     mailbox_id: str = ""
+    mail_key: str = ""       # AnyMail 子 key 明文(仅 emails:read、锁定本邮箱);降级为空
+    mail_base_url: str = ""  # 子 key 对应的 AnyMail 服务地址,分享账号时一并给出
     saved_at: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -33,6 +35,8 @@ class AccountRecord:
             "proxy": self.proxy or "",
             "display_name": self.display_name or "",
             "mailbox_id": self.mailbox_id or "",
+            "mail_key": self.mail_key or "",
+            "mail_base_url": self.mail_base_url or "",
             "saved_at": self.saved_at or "",
         }
         if self.extra:
@@ -40,13 +44,14 @@ class AccountRecord:
         return data
 
     def line_export(self) -> str:
-        """常见账号导出格式：email----password----sessionKey----proxy"""
+        """常见账号导出格式：email----password----sessionKey----proxy----mailKey"""
         return "----".join(
             [
                 self.email or "",
                 self.password or "",
                 self.sessionKey or "",
                 self.proxy or "",
+                self.mail_key or "",
             ]
         )
 

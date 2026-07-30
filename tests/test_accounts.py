@@ -75,8 +75,8 @@ def test_save_account_record_writes_json_and_jsonl(tmp_path):
     data = json.loads((out / "account.json").read_text(encoding="utf-8"))
     assert data["sessionKey"] == "sk-ant-test"
     line = (out / "account.txt").read_text(encoding="utf-8").strip()
-    # email----password----sessionKey----proxy；password 为空时是连续分隔符
-    assert line == "a@x.com--------sk-ant-test----socks5://u:p@host:1"
+    # email----password----sessionKey----proxy----mailKey；password 为空时是连续分隔符
+    assert line == "a@x.com--------sk-ant-test----socks5://u:p@host:1----"
     assert rec.line_export() == line
 
 
@@ -87,4 +87,36 @@ def test_account_record_line_export_with_password():
         sessionKey="sk",
         proxy="http://p",
     )
-    assert rec.line_export() == "u@d.com----secret----sk----http://p"
+    assert rec.line_export() == "u@d.com----secret----sk----http://p----"
+
+
+# ---------- mail_key 导出(子 key 委派) ----------
+
+
+def test_line_export_has_five_segments_with_mail_key():
+    r = AccountRecord(
+        email="a@b.c", password="p", sessionKey="sk", proxy="pr",
+        mail_key="ak_child",
+    )
+    assert r.line_export() == "a@b.c----p----sk----pr----ak_child"
+
+
+def test_line_export_keeps_five_segments_when_mail_key_empty():
+    """降级(没派生成子 key)时段数不变,消费端解析稳定。"""
+    r = AccountRecord(email="a@b.c")
+    line = r.line_export()
+    assert line.split("----") == ["a@b.c", "", "", "", ""]
+
+
+def test_to_dict_always_contains_mail_fields():
+    d = AccountRecord(email="a@b.c").to_dict()
+    assert d["mail_key"] == ""
+    assert d["mail_base_url"] == ""
+
+
+def test_to_dict_carries_mail_fields():
+    d = AccountRecord(
+        email="a@b.c", mail_key="ak_child", mail_base_url="https://mail.test"
+    ).to_dict()
+    assert d["mail_key"] == "ak_child"
+    assert d["mail_base_url"] == "https://mail.test"
