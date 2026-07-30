@@ -66,6 +66,14 @@ class Mailbox:
     tag: str | None = None
 
 
+@dataclass(frozen=True)
+class ChildKey:
+    """按次派生的受限子 key(仅 emails:read + 锁定单邮箱)。明文只在创建响应可得。"""
+
+    id: str
+    plaintext: str
+
+
 # 致命错误：不会因为重试而变好（正则语法错 / key 失效 / scope 不足）
 FATAL_STATUSES = frozenset({400, 401, 403})
 
@@ -479,6 +487,80 @@ class AnyMailClient:
             sleep(interval)
 
         return None
+
+    def create_child_key(
+        self,
+        *,
+        email: str,
+        expires_at: str | None,
+        name_prefix: str = "claude-register",
+    ) -> ChildKey | None:
+        """POST /api/keys 派生仅 emails:read、锁定 email、随邮箱过期的子 key。
+
+        任何失败(403 缺 keys:create / 400 子集越界 / 5xx / 网络错误 / 响应异形)
+        都只警告并返回 None——派生失败不值得中断注册,调用方降级用父 key 轮询。
+        """
+        target = email.strip().lower()
+        body: dict[str, Any] = {
+            "name": f"{name_prefix} {target}",
+            "scopes": ["emails:read"],
+            "provider": "domain",
+            "address": target,
+            "expires_at": expires_at,
+        }
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                resp = client.post(
+                    f"{self.base_url}/api/keys",
+                    headers=self._headers(content_type=True),
+                    json=body,
+                )
+        except httpx.HTTPError as exc:
+            log(f"派生子 key 请求失败({exc}),降级:轮询继续用主 key。")
+            return None
+
+        if resp.status_code >= 400:
+            log(
+                f"派生子 key 失败 {resp.status_code}: {resp.text[:200]}。"
+                "降级:轮询继续用主 key,导出的 mailKey 将为空。"
+                "(403 通常是主 key 缺 keys:create;400 可能是子集越界,"
+                "如主 key 带有效期而邮箱永久。)"
+            )
+            return None
+
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
+        key = data.get("key") if isinstance(data, dict) else None
+        key_id = str(key.get("id") or "") if isinstance(key, dict) else ""
+        plaintext = str(data.get("plaintext") or "") if isinstance(data, dict) else ""
+        if not key_id or not plaintext:
+            log(f"派生子 key 响应异常:{data!r},降级:轮询继续用主 key。")
+            return None
+        return ChildKey(id=key_id, plaintext=plaintext)
+
+    def delete_key(self, key_id: str) -> None:
+        """DELETE /api/keys/{id} 撤销子 key。404 视为已删;其余失败只警告。
+
+        回收失败不影响主流程——子 key 本身带过期兜底。
+        """
+        if not key_id:
+            return
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                resp = client.delete(
+                    f"{self.base_url}/api/keys/{key_id}",
+                    headers=self._headers(),
+                )
+        except httpx.HTTPError as exc:
+            log(f"撤销子 key 请求失败({exc}),忽略——子 key 会随过期自动失效。")
+            return
+        if resp.status_code >= 400 and resp.status_code != 404:
+            log(
+                f"撤销子 key 失败 {resp.status_code}: {resp.text[:200]},"
+                "忽略——子 key 会随过期自动失效。"
+            )
 
     def delete_mailbox(self, account_id: str) -> None:
         if not account_id:
