@@ -367,6 +367,18 @@ code,
   font-size: 13px;
 }
 
+.takeover-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+a.btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
 .empty-hint {
   color: var(--text-faint);
   font-size: 13px;
