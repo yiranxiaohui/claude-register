@@ -147,7 +147,22 @@ def test_update_account_check_missing(tmp_path):
 
 
 def test_migrate_adds_check_columns(tmp_path):
-    # 老库无新列，init_db 后应补上
-    conn = db.init_db(tmp_path / "t.db")
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    """旧库无 check_status/checked_at 列时 init_db 要补齐。"""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE accounts (
+          email TEXT UNIQUE, domain TEXT, created_at TEXT, expires_at TEXT,
+          mailbox_id TEXT, last_run_id INTEGER, status TEXT,
+          password TEXT, session_key TEXT, proxy TEXT, display_name TEXT
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    conn2 = db.init_db(path)
+    cols = {r[1] for r in conn2.execute("PRAGMA table_info(accounts)").fetchall()}
     assert "check_status" in cols and "checked_at" in cols
