@@ -1,3 +1,4 @@
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 const STATUS = {
@@ -10,12 +11,7 @@ const STATUS = {
 export function StatusBadge({ status }) {
   const s = STATUS[status] || { label: status || "未知", cls: "bg-muted text-muted-foreground" };
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold whitespace-nowrap",
-        s.cls,
-      )}
-    >
+    <Badge className={cn("gap-1.5 rounded-full border-transparent", s.cls)}>
       <span
         className={cn(
           "size-1.5 rounded-full bg-current",
@@ -23,6 +19,6 @@ export function StatusBadge({ status }) {
         )}
       />
       {s.label}
-    </span>
+    </Badge>
   );
 }

@@ -92,7 +92,6 @@ export default function Nodes() {
 
   return (
     <>
-      <h1 className="mb-5 text-xl font-semibold">节点</h1>
 
       <Card className="mb-5">
         <CardHeader>

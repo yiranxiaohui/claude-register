@@ -92,7 +92,6 @@ export default function Settings() {
 
   return (
     <>
-      <h1 className="mb-5 text-xl font-semibold">设置</h1>
       <form onSubmit={save}>
         {GROUPS.map((group) => (
           <Card className="mb-5" key={group.title}>
