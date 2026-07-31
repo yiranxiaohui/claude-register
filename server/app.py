@@ -14,6 +14,7 @@ from sse_starlette.sse import EventSourceResponse
 from claude_register import flow
 from claude_register.accounts import AccountRecord
 from claude_register.proxy_pool import ProxyPool, XuiNode
+from claude_register.session_check import check_session
 from claude_register.xui import XuiClient
 from server import auth, db
 from server.config_store import save_config, to_redacted_dict
@@ -249,6 +250,18 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         except RunnerBusy:
             raise HTTPException(status_code=409, detail="已有任务在运行")
         return {"run_id": rid}
+
+    @app.post("/api/accounts/{email}/check")
+    async def account_check(email: str, _=Depends(require_auth)):
+        row = db.get_account(state.conn, email)
+        if row is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        checked_at = state.now_fn()
+        status, detail = await asyncio.to_thread(
+            check_session, row.get("session_key") or "", row.get("proxy") or ""
+        )
+        db.update_account_check(state.conn, email, status, checked_at)
+        return {"status": status, "detail": detail, "checked_at": checked_at}
 
     @app.post("/api/takeover/start")
     async def takeover_start(request: Request, _=Depends(require_auth)):
