@@ -247,7 +247,7 @@ export default function Accounts({ attach, running, navigate }) {
           {accounts.length === 0 ? (
             <div className="text-sm text-muted-foreground">暂无账号</div>
           ) : (
-            <ScrollArea className="max-h-[560px]">
+            <ScrollArea className="[&>[data-slot=scroll-area-viewport]]:max-h-[560px]">
               <ul className="flex flex-col gap-1.5 pr-3">
               {accounts.map((a) => (
                 <li key={a.email} className="flex flex-col">
