@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import httpx
-import pytest
 
-from claude_register.session_check import check_session
+from claude_register.session_check import _default_client, check_session
 
 ORG_URL = "https://claude.ai/api/organizations"
 
@@ -85,3 +84,11 @@ def test_no_proxy_passes_none():
     make, captured = _factory(lambda req: httpx.Response(200, json=[]))
     check_session("sk-x", proxy="", client_factory=make)
     assert captured["proxy"] is None
+
+
+def test_default_client_constructs():
+    """生产工厂 _default_client 能正常构造 httpx.Client（不走网络、不 mock）。"""
+    with _default_client("http://1.2.3.4:8080") as client:
+        assert isinstance(client, httpx.Client)
+    with _default_client(None) as client:
+        assert isinstance(client, httpx.Client)
