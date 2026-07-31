@@ -5,7 +5,7 @@ description = "Open Claude login with AnyMail auto-fill"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "httpx>=0.28.1",
+    "httpx[socks]>=0.28.1",
     "playwright>=1.61.0",
     "camoufox[geoip]>=0.4.11",
     "fastapi>=0.115",
