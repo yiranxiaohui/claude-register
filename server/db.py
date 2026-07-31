@@ -144,3 +144,26 @@ def list_accounts(conn) -> list[dict]:
 def get_account(conn, email) -> dict | None:
     row = conn.execute("SELECT * FROM accounts WHERE email=?", (email,)).fetchone()
     return dict(row) if row else None
+
+
+# 面板可手工编辑的字段；email/status 等由注册流程维护，不开放
+ACCOUNT_EDITABLE_FIELDS = (
+    "password", "session_key", "proxy", "display_name", "mail_key", "mail_base_url",
+)
+
+
+def update_account_fields(conn, email, fields: dict) -> bool:
+    """仅更新 ACCOUNT_EDITABLE_FIELDS 里的字段，返回是否有行被更新。"""
+    sets = {k: str(v or "") for k, v in fields.items() if k in ACCOUNT_EDITABLE_FIELDS}
+    if not sets:
+        return False
+    sql = "UPDATE accounts SET " + ", ".join(f"{k}=?" for k in sets) + " WHERE email=?"
+    cur = conn.execute(sql, (*sets.values(), email))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_account(conn, email) -> bool:
+    cur = conn.execute("DELETE FROM accounts WHERE email=?", (email,))
+    conn.commit()
+    return cur.rowcount > 0

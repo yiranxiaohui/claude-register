@@ -52,6 +52,18 @@ export const api = {
       return r.text();
     }),
 
+  accountUpdate: (email, fields) =>
+    fetch(`/api/accounts/${encodeURIComponent(email)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fields),
+    }).then(j),
+
+  accountDelete: (email) =>
+    fetch(`/api/accounts/${encodeURIComponent(email)}`, {
+      method: "DELETE",
+    }).then(j),
+
   rerun: (email) =>
     fetch(`/api/accounts/${encodeURIComponent(email)}/rerun`, {
       method: "POST",
