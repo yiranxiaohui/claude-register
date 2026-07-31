@@ -38,10 +38,11 @@ REP_HOST_UNREACHABLE = 0x04
 REP_CMD_NOT_SUPPORTED = 0x07
 REP_ATYP_NOT_SUPPORTED = 0x08
 
-# 上游握手（连接 + 认证 + CONNECT）的超时。握手阶段卡住说明上游有问题，
-# 早点失败好过让浏览器空等到它自己的导航超时。取值比 RETRY_DEADLINE 小，
-# 这样单次卡死也不会吃掉整个重试预算。
-HANDSHAKE_TIMEOUT = 8.0
+# 上游握手（连接 + 认证 + CONNECT）的超时。握手阶段被挂住多半是撞了上游的
+# 并发限额（实测超限连接是「挂住不回复」而非快速 EOF，见 DEFAULT_MAX_UPSTREAM
+# 的说明），槽位周转很快，换条新连接重试大概率能过。取值让「挂满一次 +
+# backoff + 完整再试一次」能装进 RETRY_DEADLINE：5 + 0.4 + 5 ≈ 10.4s < 12s。
+HANDSHAKE_TIMEOUT = 5.0
 PIPE_BUFFER = 65536
 
 # 查出口 IP 用的站点。走中继查（域名交给上游解析），因为本地 DNS 可能被
@@ -50,14 +51,16 @@ PIPE_BUFFER = 65536
 EXIT_IP_HOSTS = ("api.ipify.org", "checkip.amazonaws.com", "icanhazip.com")
 EXIT_IP_TIMEOUT = 12.0
 
-# 机场类代理常有并发连接上限（实测这个上游约 4 条），超限的连接在握手第一步就被
-# EOF 掉。但槽位随着旧连接关闭很快释放，短暂重试就能过——一次失败就放弃会在
-# 注册流程中途白掉请求。只对「握手阶段就被拒」重试，CONNECT 已经被上游明确
-# 拒绝（rep != 0）说明是目标本身的问题，重试没有意义。
+# 机场类代理常有并发连接上限（实测这个上游约 4 条），超限的连接会在握手阶段
+# 被拒（EOF）或被挂住不回复（撞 HANDSHAKE_TIMEOUT）。但槽位随着旧连接关闭很快
+# 释放，短暂重试就能过——一次失败就放弃会在注册流程中途白掉请求。只对「握手
+# 阶段被拒/挂住」重试，CONNECT 已经被上游明确拒绝（rep != 0）说明是目标本身
+# 的问题，重试没有意义。
 #
 # 重试总耗时必须远小于 page.goto 的 60s 导航超时：否则上游 hang 住时浏览器先超时，
 # 用户看到的仍是 NS_ERROR_NET_TIMEOUT，而真正有用的报错还没来得及冒出来。
-# 撞并发限额的 EOF 是毫秒级返回的，不需要大预算；真的连不上就该早点认输。
+# RETRY_DEADLINE 是墙钟硬上限：挂住型失败一次就吃掉一个 HANDSHAKE_TIMEOUT，
+# 预算内装得下两次完整尝试；真的连不上就该早点认输。
 CONNECT_RETRIES = 4
 RETRY_BACKOFF = 0.4
 RETRY_DEADLINE = 12.0
@@ -123,23 +126,24 @@ class UpstreamError(Exception):
         self.retryable = retryable
 
 
-def _connect_upstream_once(cfg: dict, host: str, port: int) -> socket.socket:
+def _connect_upstream_once(cfg: dict, host: str, port: int, timeout: float) -> socket.socket:
     """跟上游完成 SOCKS5 握手，返回已建好隧道的 socket。
 
     host 原样透传给上游解析（socks5h 语义）：本地 DNS 可能被污染，
     而且本地解析会泄露我们真实的地理位置。
     """
     try:
-        up = socket.create_connection((cfg["host"], cfg["port"]), HANDSHAKE_TIMEOUT)
+        up = socket.create_connection((cfg["host"], cfg["port"]), timeout)
     except TimeoutError as exc:
-        # 连不上且是「卡住」而非「拒绝」——重试只会把导航超时耗光。
+        # TCP 都连不上说明上游主机/网络有问题（并发限额挂的是握手回复，
+        # 不影响 TCP accept）——重试只会把导航超时耗光。
         raise UpstreamError(f"连上游代理超时：{exc}", REP_HOST_UNREACHABLE) from exc
     except OSError as exc:
         raise UpstreamError(
             f"连不上上游代理：{exc}", REP_HOST_UNREACHABLE, retryable=True
         ) from exc
 
-    up.settimeout(HANDSHAKE_TIMEOUT)
+    up.settimeout(timeout)
     try:
         want_auth = bool(cfg.get("username") or cfg.get("password"))
         methods = [AUTH_NONE, AUTH_USER_PASS] if want_auth else [AUTH_NONE]
@@ -180,9 +184,11 @@ def _connect_upstream_once(cfg: dict, host: str, port: int) -> socket.socket:
         raise
     except TimeoutError as exc:
         up.close()
-        # 握手途中卡住 ≠ 撞并发限额（后者是毫秒级 EOF）。重试只会成倍消耗
-        # 导航超时预算，如实报错更有用。
-        raise UpstreamError(f"上游握手超时：{exc}") from exc
+        # 握手途中被挂住不回复——实测正是撞并发限额的表现（上游把超限连接
+        # hang 住而非 EOF）。槽位周转快，换条新连接重试大概率能过；重试的
+        # 墙钟预算由 _connect_upstream 的 RETRY_DEADLINE 兜底，不会耗光
+        # 浏览器的导航超时。
+        raise UpstreamError(f"上游握手超时：{exc}", retryable=True) from exc
     except (OSError, ConnectionError) as exc:
         up.close()
         # 握手途中被 EOF——典型的撞并发限额表现，值得重试。
@@ -196,15 +202,20 @@ def _connect_upstream(cfg: dict, host: str, port: int) -> socket.socket:
     """带重试的上游连接。只重试握手阶段的失败（多半是并发限额），
     上游明确拒绝的目标不重试。
 
-    重试受 RETRY_DEADLINE 墙钟约束：撞并发限额的 EOF 是毫秒级返回的，
-    真正吃时间的是上游 hang 住——那种情况多试几次也没用，只会把浏览器的
-    导航超时耗光，让用户看到没信息量的 NS_ERROR_NET_TIMEOUT。
+    重试受 RETRY_DEADLINE 墙钟约束：EOF 型失败是毫秒级返回的，挂住型失败
+    一次就吃掉一个 HANDSHAKE_TIMEOUT——后续尝试的超时按剩余预算收紧，
+    保证总耗时不越过 deadline 太多，不把浏览器的导航超时耗光。
     """
     deadline = time.monotonic() + RETRY_DEADLINE
     last: UpstreamError | None = None
     for attempt in range(CONNECT_RETRIES):
+        # 首次给完整超时；重试按剩余预算收紧，免得多次挂住把墙钟撑爆。
+        remaining = deadline - time.monotonic()
+        if attempt and remaining <= RETRY_BACKOFF:
+            break
+        timeout = HANDSHAKE_TIMEOUT if attempt == 0 else min(HANDSHAKE_TIMEOUT, remaining)
         try:
-            return _connect_upstream_once(cfg, host, port)
+            return _connect_upstream_once(cfg, host, port, timeout)
         except UpstreamError as exc:
             last = exc
             if not exc.retryable:
