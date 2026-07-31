@@ -47,7 +47,6 @@ export default function Register({ runStream }) {
 
   return (
     <>
-      <h1 className="mb-5 text-xl font-semibold">注册</h1>
       <div className="grid items-start gap-5 min-[1200px]:grid-cols-[5fr_7fr]">
         <Card>
           <CardHeader>

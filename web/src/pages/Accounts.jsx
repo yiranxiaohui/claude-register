@@ -213,7 +213,6 @@ export default function Accounts({ attach, running, navigate }) {
 
   return (
     <>
-      <h1 className="mb-5 text-xl font-semibold">账号</h1>
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle>账号列表</CardTitle>
