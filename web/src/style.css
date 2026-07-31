@@ -443,6 +443,26 @@ a.btn {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.badge.live-alive {
+  color: var(--success);
+  background: var(--success-bg);
+}
+
+.badge.live-dead {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.badge.live-error {
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.live-time {
+  opacity: 0.7;
+  font-weight: normal;
+}
+
 @keyframes pulse {
   0%,
   100% {
