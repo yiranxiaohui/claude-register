@@ -1,8 +1,10 @@
-"""接管会话：注入 sessionKey 的已登录 claude.ai 浏览器 + x11vnc，供 noVNC 接管。
+"""接管会话：注入 sessionKey 的已登录 claude.ai 浏览器 + KasmVNC，供网页接管。
 
 与注册流程（server/runner.py）平级、各用各的屏：注册走 Camoufox 的 "virtual"
-自选屏，接管自己管一块固定的 Xvfb :100，x11vnc 精确挂上去。单例：同一时刻
-只允许一个接管会话。全部子进程只绑 localhost，不对外暴露端口。
+自选屏，接管用 KasmVNC 的 Xvnc 直接当 :100 的 X 服务器（自带 Web 客户端与
+websocket 推流，比 Xvfb+x11vnc+noVNC 三件套流畅得多，进程也从两个减到一个）。
+单例：同一时刻只允许一个接管会话。Xvnc 只绑 localhost，不对外暴露端口，
+由面板反代（server/app.py 的 /vnc/*）复用密码鉴权。
 """
 from __future__ import annotations
 
@@ -38,9 +40,13 @@ def _terminate(proc) -> None:
             pass
 
 
+# KasmVNC 的 Web 资源目录（deb 安装的固定路径），Xvnc 的 -httpd 指到这里。
+KASM_WWW = "/usr/share/kasmvnc/www"
+
+
 class TakeoverManager:
     def __init__(self, *, now_fn, launcher=None, browser_fn=None,
-                 wait_display_fn=None, display=":100", vnc_port=5900):
+                 wait_display_fn=None, display=":100", web_port=6901):
         self.now_fn = now_fn
         self.launcher = launcher or ProcessLauncher()
         self._browser_fn = browser_fn
@@ -50,13 +56,12 @@ class TakeoverManager:
             from server.takeover_browser import wait_x_socket
             self._wait_display = lambda display: wait_x_socket(display)
         self.display = display
-        self.vnc_port = vnc_port
+        self.web_port = web_port
         self._lock = threading.RLock()
         self._active = False
         self._email = None
         self._started_at = None
-        self._xvfb = None
-        self._x11vnc = None
+        self._xvnc = None
         self._browser = None
         self._timer = None
 
@@ -76,18 +81,24 @@ class TakeoverManager:
                 from server.takeover_browser import open_takeover_browser
                 self._browser_fn = open_takeover_browser
             try:
-                self._xvfb = self.launcher.spawn([
-                    "Xvfb", self.display, "-screen", "0", "1280x900x24",
-                    "-nolisten", "tcp",
+                # KasmVNC 的 Xvnc 本身就是 X 服务器，浏览器直接挂上去，无需
+                # Xvfb+x11vnc 两级。要点：
+                # - 只监听 localhost 的 websocket 口（实测无遗留 RFB/X TCP 口）；
+                # - -SecurityTypes None + -DisableBasicAuth：鉴权由面板反代做；
+                # - -publicIP 127.0.0.1：跳过启动时的 STUN 公网探测（外网被墙时
+                #   会卡住 websocket 监听迟迟不起来）；WebRTC/UDP 用不到。
+                self._xvnc = self.launcher.spawn([
+                    "Xvnc", self.display, "-geometry", "1280x900", "-depth", "24",
+                    "-interface", "127.0.0.1",
+                    "-websocketPort", str(self.web_port),
+                    "-SecurityTypes", "None", "-DisableBasicAuth",
+                    "-sslOnly", "0", "-publicIP", "127.0.0.1",
+                    "-httpd", KASM_WWW,
                 ])
                 self._wait_display(self.display)
                 self._browser = self._browser_fn(
                     session_key=session_key, proxy=proxy, display=self.display,
                 )
-                self._x11vnc = self.launcher.spawn([
-                    "x11vnc", "-display", self.display, "-localhost", "-forever",
-                    "-shared", "-rfbport", str(self.vnc_port), "-nopw", "-quiet",
-                ])
             except Exception as exc:  # noqa: BLE001
                 self._teardown()
                 raise TakeoverError(f"启动接管会话失败：{exc}") from exc
@@ -115,15 +126,12 @@ class TakeoverManager:
             self._started_at = None
 
     def _teardown(self):
-        if self._x11vnc is not None:
-            _terminate(self._x11vnc)
-            self._x11vnc = None
         if self._browser is not None:
             try:
                 self._browser.close()
             except Exception:
                 pass
             self._browser = None
-        if self._xvfb is not None:
-            _terminate(self._xvfb)
-            self._xvfb = None
+        if self._xvnc is not None:
+            _terminate(self._xvnc)
+            self._xvnc = None

@@ -58,7 +58,12 @@ def test_start_status_stop_sequence():
     assert info["email"] == "a@x.com"
     assert m.status() == {"running": True, "email": "a@x.com", "started_at": "2026-07-30T00:00:00Z"}
     argv0 = [p.argv[0] for p in launcher.spawned]
-    assert "Xvfb" in argv0 and "x11vnc" in argv0
+    assert argv0 == ["Xvnc"]
+    xvnc_argv = launcher.spawned[0].argv
+    # 关键安全参数：只绑 localhost、鉴权交给面板反代、跳过 STUN 公网探测
+    assert "-interface" in xvnc_argv and "127.0.0.1" in xvnc_argv
+    assert "-DisableBasicAuth" in xvnc_argv
+    assert "-publicIP" in xvnc_argv
     assert len(browsers) == 1
 
     m.stop()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import os
+import httpx
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
@@ -287,20 +287,33 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     def takeover_status(_=Depends(require_auth)):
         return state.takeover.status()
 
-    NOVNC_DIR = os.environ.get("NOVNC_DIR", "/usr/share/novnc")
+    # ---- KasmVNC 反代（HTTP 资源 + websocket 推流都过面板，复用密码鉴权）----
+    # Xvnc 只绑 127.0.0.1:<web_port>，外界唯一入口是这里。端口每次请求时从
+    # manager 读：测试里可以把它指到假上游。
+    def _kasm_base() -> str:
+        return f"http://127.0.0.1:{state.takeover.web_port}"
 
     @app.get("/vnc/{path:path}")
-    def vnc_static(path: str, _=Depends(require_auth)):
-        base = Path(NOVNC_DIR).resolve()
-        target = (base / (path or "vnc.html")).resolve()
-        if base != target and base not in target.parents:
+    async def vnc_http(path: str, _=Depends(require_auth)):
+        if ".." in path:
             raise HTTPException(status_code=404)
-        if not target.is_file():
-            raise HTTPException(status_code=404)
-        return FileResponse(target)
+        base = _kasm_base()
+        url = f"{base}/{path}" if path else f"{base}/"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(url)
+        except Exception:
+            raise HTTPException(
+                status_code=502, detail="KasmVNC 未运行，请先启动接管会话"
+            )
+        return Response(
+            r.content,
+            status_code=r.status_code,
+            media_type=r.headers.get("content-type"),
+        )
 
-    # noVNC ≥1.5 出于安全不再信任 URL 里的 path 参数，会连默认的 /websockify，
-    # 两个路径都注册；否则 WS 会落到根部 StaticFiles 直接 500。
+    # 旧版 noVNC 客户端会按页面路径解析出 /vnc/websockify，直连 /websockify 的
+    # 老书签也兼容；两个路径都桥到 KasmVNC 的 websocket。
     @app.websocket("/websockify")
     @app.websocket("/vnc/websockify")
     async def vnc_ws(ws: WebSocket):
@@ -309,47 +322,66 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         if not cfg.panel_password or not auth.verify_token(token, cfg.panel_password, state.secret):
             await ws.close(code=1008)
             return
-        # 只回显客户端请求过的子协议：noVNC ≥1.6 不请求任何子协议，
-        # 若强行选 binary，浏览器按规范直接断开（表现为"无法连接到服务器"）。
+        # 子协议：把客户端请求的原样递给上游，再把上游选中的回给客户端
+        # （KasmVNC 自家客户端请求 binary；选了客户端没请求的子协议会被浏览器断开）。
         offered = [
             p.strip()
             for p in ws.headers.get("sec-websocket-protocol", "").split(",")
             if p.strip()
         ]
-        await ws.accept(subprotocol="binary" if "binary" in offered else None)
         try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", 5900)
+            import websockets
+
+            upstream = await websockets.connect(
+                f"ws://127.0.0.1:{state.takeover.web_port}/websockify",
+                subprotocols=offered or None,
+                # KasmVNC 校验 Origin 头，缺了直接 404
+                additional_headers={"Origin": _kasm_base()},
+                open_timeout=8,
+                max_size=None,
+            )
         except Exception:
             await ws.close(code=1011)
             return
+        await ws.accept(subprotocol=upstream.protocol.subprotocol)
 
-        async def ws_to_tcp():
+        async def client_to_kasm():
             try:
                 while True:
-                    data = await ws.receive_bytes()
-                    writer.write(data)
-                    await writer.drain()
-            except Exception:
-                pass
-
-        async def tcp_to_ws():
-            try:
-                while True:
-                    data = await reader.read(65536)
-                    if not data:
+                    msg = await ws.receive()
+                    if msg.get("bytes") is not None:
+                        await upstream.send(msg["bytes"])
+                    elif msg.get("text") is not None:
+                        await upstream.send(msg["text"])
+                    else:  # disconnect
                         break
-                    await ws.send_bytes(data)
             except Exception:
                 pass
 
-        tasks = [asyncio.create_task(ws_to_tcp()), asyncio.create_task(tcp_to_ws())]
+        async def kasm_to_client():
+            try:
+                async for data in upstream:
+                    if isinstance(data, bytes):
+                        await ws.send_bytes(data)
+                    else:
+                        await ws.send_text(data)
+            except Exception:
+                pass
+
+        tasks = [
+            asyncio.create_task(client_to_kasm()),
+            asyncio.create_task(kasm_to_client()),
+        ]
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            writer.close()
+            try:
+                await upstream.close()
+            except Exception:
+                pass
             try:
                 await ws.close()
             except Exception:
