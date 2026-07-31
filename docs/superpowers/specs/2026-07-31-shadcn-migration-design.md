@@ -23,6 +23,7 @@
 - `Accounts.jsx`：列表布局保留（不表格化）；行内编辑面板保留但控件换 shadcn；删除账号 `window.confirm` → `AlertDialog`；复制成功、导出失败、重跑失败、接管报错等全部 → toast。
 - `Nodes.jsx`：Toggle → `Switch`；节点卡片用 `Card`；测试/清理/保存结果 → toast；测试/删除按钮带 lucide 图标（FlaskConical/Trash2）。
 - `Settings.jsx`：三张分组卡用 `Card`；checkbox → `Switch`；保存结果 → toast。
+- `Login.jsx`：`style.css` 删除后其样式类失效，一并迁移（Card + Input + Button，登录失败 → toast）；Toaster 移到 App 最外层保证未登录时也能显示。
 - 删除：`web/src/style.css`、`web/src/components/Toggle.jsx`。
 - 页内 success/error 消息条全部移除，统一 toast；表单加载失败仍用页内提示（页面主体没内容时 toast 不够）。
 
