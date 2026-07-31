@@ -224,6 +224,24 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             headers={"Content-Disposition": 'attachment; filename="accounts.txt"'},
         )
 
+    @app.patch("/api/accounts/{email}")
+    async def account_update(email: str, request: Request, _=Depends(require_auth)):
+        if db.get_account(state.conn, email) is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        body = await request.json() if await request.body() else {}
+        fields = {k: body[k] for k in db.ACCOUNT_EDITABLE_FIELDS if k in body}
+        if not fields:
+            raise HTTPException(status_code=400, detail="没有可更新的字段")
+        db.update_account_fields(state.conn, email, fields)
+        row = db.get_account(state.conn, email)
+        return {**row, "text": _account_text(row)}
+
+    @app.delete("/api/accounts/{email}")
+    def account_delete(email: str, _=Depends(require_auth)):
+        if not db.delete_account(state.conn, email):
+            raise HTTPException(status_code=404, detail="账号不存在")
+        return {"ok": True}
+
     @app.post("/api/accounts/{email}/rerun")
     def rerun(email: str, _=Depends(require_auth)):
         try:

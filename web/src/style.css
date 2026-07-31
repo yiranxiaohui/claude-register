@@ -534,6 +534,45 @@ li.list-row {
   border-color: var(--accent);
 }
 
+.list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.edit-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.edit-label {
+  flex: 0 0 76px;
+  color: var(--text-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.edit-field .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .list-main {
   display: flex;
   flex-direction: column;

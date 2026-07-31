@@ -34,6 +34,9 @@ export default function Dashboard() {
   const [rerunError, setRerunError] = useState("");
   const [copiedEmail, setCopiedEmail] = useState("");
   const [exportError, setExportError] = useState("");
+  const [editingEmail, setEditingEmail] = useState("");
+  const [editForm, setEditForm] = useState({});
+  const [editError, setEditError] = useState("");
 
   const logPanelRef = useRef(null);
   const esRef = useRef(null);
@@ -158,6 +161,40 @@ export default function Dashboard() {
               ? "接管功能已禁用"
               : `启动接管失败（${e.status || "?"}）`,
       );
+    }
+  };
+
+  const startEdit = (a) => {
+    setEditError("");
+    setEditingEmail(a.email);
+    setEditForm({
+      display_name: a.display_name || "",
+      password: a.password || "",
+      session_key: a.session_key || "",
+      proxy: a.proxy || "",
+    });
+  };
+
+  const saveEdit = async () => {
+    setEditError("");
+    try {
+      await api.accountUpdate(editingEmail, editForm);
+      setEditingEmail("");
+      refreshLists();
+    } catch (e) {
+      setEditError(`保存失败（${e.status || "?"}）`);
+    }
+  };
+
+  const deleteAccount = async () => {
+    if (!window.confirm(`确认删除账号 ${editingEmail}？此操作不可恢复。`)) return;
+    setEditError("");
+    try {
+      await api.accountDelete(editingEmail);
+      setEditingEmail("");
+      refreshLists();
+    } catch (e) {
+      setEditError(`删除失败（${e.status || "?"}）`);
     }
   };
 
@@ -325,36 +362,88 @@ export default function Dashboard() {
         ) : (
           <ul className="list">
             {accounts.map((a) => (
-              <li key={a.email} className="list-row">
-                <span className="list-main">
-                  <span>{a.email}</span>
-                  <span className="list-sub">
-                    {a.domain || ""}
-                    {a.session_key
-                      ? ` · sk ${String(a.session_key).slice(0, 12)}…`
-                      : ""}
-                    {a.proxy ? " · proxy" : ""}
-                    {a.display_name ? ` · ${a.display_name}` : ""}
+              <li key={a.email} className="list-item">
+                <div className="list-row">
+                  <span className="list-main">
+                    <span>{a.email}</span>
+                    <span className="list-sub">
+                      {a.domain || ""}
+                      {a.session_key
+                        ? ` · sk ${String(a.session_key).slice(0, 12)}…`
+                        : ""}
+                      {a.proxy ? " · proxy" : ""}
+                      {a.display_name ? ` · ${a.display_name}` : ""}
+                    </span>
                   </span>
-                </span>
-                <StatusBadge status={a.status} />
-                <button className="btn btn-small" onClick={() => copyLine(a)}>
-                  {copiedEmail === a.email ? "已复制" : "复制"}
-                </button>
-                <button
-                  className="btn btn-small"
-                  onClick={() => doRerun(a.email)}
-                  disabled={activeStatus === "running"}
-                >
-                  重跑
-                </button>
-                {a.session_key && (
+                  <StatusBadge status={a.status} />
+                  <button className="btn btn-small" onClick={() => copyLine(a)}>
+                    {copiedEmail === a.email ? "已复制" : "复制"}
+                  </button>
                   <button
                     className="btn btn-small"
-                    onClick={() => startTakeover(a.email)}
+                    onClick={() =>
+                      editingEmail === a.email
+                        ? setEditingEmail("")
+                        : startEdit(a)
+                    }
                   >
-                    接管
+                    {editingEmail === a.email ? "收起" : "编辑"}
                   </button>
+                  <button
+                    className="btn btn-small"
+                    onClick={() => doRerun(a.email)}
+                    disabled={activeStatus === "running"}
+                  >
+                    重跑
+                  </button>
+                  {a.session_key && (
+                    <button
+                      className="btn btn-small"
+                      onClick={() => startTakeover(a.email)}
+                    >
+                      接管
+                    </button>
+                  )}
+                </div>
+                {editingEmail === a.email && (
+                  <div className="edit-form">
+                    {[
+                      ["display_name", "备注"],
+                      ["password", "密码"],
+                      ["session_key", "sessionKey"],
+                      ["proxy", "代理（如 socks5://user:pass@host:port）"],
+                    ].map(([key, label]) => (
+                      <label key={key} className="edit-field">
+                        <span className="edit-label">{label}</span>
+                        <input
+                          className="input"
+                          value={editForm[key] ?? ""}
+                          placeholder={label}
+                          onChange={(e) =>
+                            setEditForm((f) => ({ ...f, [key]: e.target.value }))
+                          }
+                        />
+                      </label>
+                    ))}
+                    <div className="edit-actions">
+                      <button className="btn btn-small" onClick={saveEdit}>
+                        保存
+                      </button>
+                      <button
+                        className="btn btn-small"
+                        onClick={() => setEditingEmail("")}
+                      >
+                        取消
+                      </button>
+                      <button
+                        className="btn btn-small btn-danger"
+                        onClick={deleteAccount}
+                      >
+                        删除账号
+                      </button>
+                    </div>
+                    {editError && <div className="error-msg">{editError}</div>}
+                  </div>
                 )}
               </li>
             ))}
