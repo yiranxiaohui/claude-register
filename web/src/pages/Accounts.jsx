@@ -2,11 +2,36 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { StatusBadge } from "./Register.jsx";
 
+const LIVE_LABEL = { alive: "有效", dead: "失效", error: "检测失败" };
+
+function relTime(iso) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const sec = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (sec < 60) return "刚刚";
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
+  return `${Math.floor(sec / 86400)} 天前`;
+}
+
+function LiveBadge({ status, checkedAt, detail }) {
+  if (!status) return null;
+  return (
+    <span className={`badge live-${status}`} title={detail || ""}>
+      {LIVE_LABEL[status] || status}
+      {checkedAt ? <span className="live-time"> · {relTime(checkedAt)}</span> : null}
+    </span>
+  );
+}
+
 export default function Accounts({ attach, running, navigate }) {
   const [accounts, setAccounts] = useState([]);
   const [takeover, setTakeover] = useState({ running: false, email: null });
   const [takeoverError, setTakeoverError] = useState("");
   const [rerunError, setRerunError] = useState("");
+  const [checking, setChecking] = useState("");
+  const [checkError, setCheckError] = useState("");
   const [copiedEmail, setCopiedEmail] = useState("");
   const [exportError, setExportError] = useState("");
   const [editingEmail, setEditingEmail] = useState("");
@@ -34,6 +59,25 @@ export default function Accounts({ attach, running, navigate }) {
           ? `「${acctEmail}」重跑失败：已有任务在运行`
           : `「${acctEmail}」重跑失败`,
       );
+    }
+  }
+
+  async function doCheck(acctEmail) {
+    setCheckError("");
+    setChecking(acctEmail);
+    try {
+      const res = await api.checkAccount(acctEmail);
+      setAccounts((list) =>
+        list.map((a) =>
+          a.email === acctEmail
+            ? { ...a, check_status: res.status, checked_at: res.checked_at }
+            : a,
+        ),
+      );
+    } catch (e) {
+      setCheckError(`「${acctEmail}」检测失败（${e.status || "?"}）`);
+    } finally {
+      setChecking("");
     }
   }
 
@@ -169,6 +213,7 @@ export default function Accounts({ attach, running, navigate }) {
         )}
         {takeoverError && <div className="error-msg">{takeoverError}</div>}
         {rerunError && <div className="error-msg">{rerunError}</div>}
+        {checkError && <div className="error-msg">{checkError}</div>}
         {exportError && <div className="error-msg">{exportError}</div>}
         {accounts.length === 0 ? (
           <div className="empty-hint">暂无账号</div>
@@ -185,6 +230,7 @@ export default function Accounts({ attach, running, navigate }) {
                     </span>
                     <span className="list-sub">
                       <StatusBadge status={a.status} />
+                      <LiveBadge status={a.check_status} checkedAt={a.checked_at} />
                       {a.display_name ? <span>{a.display_name}</span> : null}
                       {a.session_key ? (
                         <span className="mono">
@@ -213,6 +259,15 @@ export default function Accounts({ attach, running, navigate }) {
                     >
                       重跑
                     </button>
+                    {a.session_key && (
+                      <button
+                        className="btn btn-small"
+                        onClick={() => doCheck(a.email)}
+                        disabled={checking === a.email}
+                      >
+                        {checking === a.email ? "检测中…" : "检测"}
+                      </button>
+                    )}
                     {a.session_key && (
                       <button
                         className="btn btn-small btn-takeover"
