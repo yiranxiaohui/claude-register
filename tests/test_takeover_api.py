@@ -130,3 +130,15 @@ def test_vnc_ws_rejects_without_cookie(tmp_path, monkeypatch):
     with pytest.raises(WebSocketDisconnect):
         with c.websocket_connect("/vnc/websockify") as ws:
             ws.receive_bytes()
+
+
+def test_vnc_ws_default_websockify_path(tmp_path, monkeypatch):
+    """noVNC ≥1.5 忽略 URL path 参数、连默认 /websockify：必须命中 WS 桥而非 StaticFiles。"""
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app)
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/websockify") as ws:
+            ws.receive_bytes()

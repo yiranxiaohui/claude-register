@@ -281,6 +281,9 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             raise HTTPException(status_code=404)
         return FileResponse(target)
 
+    # noVNC ≥1.5 出于安全不再信任 URL 里的 path 参数，会连默认的 /websockify，
+    # 两个路径都注册；否则 WS 会落到根部 StaticFiles 直接 500。
+    @app.websocket("/websockify")
     @app.websocket("/vnc/websockify")
     async def vnc_ws(ws: WebSocket):
         cfg = state.config()
