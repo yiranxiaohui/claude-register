@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   email TEXT UNIQUE, domain TEXT, created_at TEXT, expires_at TEXT,
   mailbox_id TEXT, last_run_id INTEGER, status TEXT,
   password TEXT, session_key TEXT, proxy TEXT, display_name TEXT,
-  mail_key TEXT, mail_base_url TEXT
+  mail_key TEXT, mail_base_url TEXT,
+  check_status TEXT, checked_at TEXT
 );
 """
 
@@ -25,6 +26,8 @@ _ACCOUNT_EXTRA_COLS = (
     ("display_name", "TEXT"),
     ("mail_key", "TEXT"),
     ("mail_base_url", "TEXT"),
+    ("check_status", "TEXT"),
+    ("checked_at", "TEXT"),
 )
 
 
@@ -159,6 +162,16 @@ def update_account_fields(conn, email, fields: dict) -> bool:
         return False
     sql = "UPDATE accounts SET " + ", ".join(f"{k}=?" for k in sets) + " WHERE email=?"
     cur = conn.execute(sql, (*sets.values(), email))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def update_account_check(conn, email, status, checked_at) -> bool:
+    """更新单个账号的存活检测结果，返回是否有行被更新。"""
+    cur = conn.execute(
+        "UPDATE accounts SET check_status=?, checked_at=? WHERE email=?",
+        (status, checked_at, email),
+    )
     conn.commit()
     return cur.rowcount > 0
 

@@ -129,3 +129,25 @@ def test_migrate_adds_session_columns(tmp_path):
     cols = {r[1] for r in conn2.execute("PRAGMA table_info(accounts)").fetchall()}
     assert "session_key" in cols
     assert "proxy" in cols
+
+
+def test_update_account_check(tmp_path):
+    conn = db.init_db(tmp_path / "t.db")
+    db.upsert_account(conn, email="a@x.com", domain="x.com", created_at="t0",
+                      expires_at=None, mailbox_id="m", last_run_id=1, status="success")
+    assert db.update_account_check(conn, "a@x.com", "alive", "2026-07-31T00:00:00Z") is True
+    row = db.get_account(conn, "a@x.com")
+    assert row["check_status"] == "alive"
+    assert row["checked_at"] == "2026-07-31T00:00:00Z"
+
+
+def test_update_account_check_missing(tmp_path):
+    conn = db.init_db(tmp_path / "t.db")
+    assert db.update_account_check(conn, "none@x.com", "dead", "t") is False
+
+
+def test_migrate_adds_check_columns(tmp_path):
+    # 老库无新列，init_db 后应补上
+    conn = db.init_db(tmp_path / "t.db")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    assert "check_status" in cols and "checked_at" in cols
