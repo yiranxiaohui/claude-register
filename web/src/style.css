@@ -127,10 +127,10 @@ code,
   align-items: start;
 }
 
-/* 宽屏三列：注册表单窄、账号列表宽 */
+/* 宽屏两列：注册表单窄、运行历史宽 */
 @media (min-width: 1200px) {
   .dashboard-grid {
-    grid-template-columns: 5fr 6fr 8fr;
+    grid-template-columns: 5fr 7fr;
   }
 }
 
@@ -744,9 +744,6 @@ li.list-row {
   flex-direction: column;
   padding: 20px 12px;
   gap: 4px;
-  position: sticky;
-  top: 0;
-  height: 100vh;
 }
 .sidebar-brand {
   font-weight: 700;
