@@ -148,11 +148,6 @@ export default function Dashboard() {
       await api.takeoverStart(acctEmail);
       const st = await api.takeoverStatus();
       setTakeover(st);
-      window.open(
-        "/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify",
-        "_blank",
-        "noopener",
-      );
     } catch (e) {
       setTakeoverError(
         e.status === 409
@@ -308,9 +303,19 @@ export default function Dashboard() {
         {takeover.running && (
           <div className="takeover-bar">
             正在接管：{takeover.email}
-            <button className="btn btn-small" onClick={stopTakeover}>
-              结束接管
-            </button>
+            <span className="takeover-actions">
+              <a
+                className="btn btn-small"
+                href="/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                打开画面
+              </a>
+              <button className="btn btn-small" onClick={stopTakeover}>
+                结束接管
+              </button>
+            </span>
           </div>
         )}
         {takeoverError && <div className="error-msg">{takeoverError}</div>}
