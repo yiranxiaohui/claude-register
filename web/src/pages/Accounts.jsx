@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -47,18 +50,15 @@ function relTime(iso) {
 function LiveBadge({ status, checkedAt, detail }) {
   if (!status) return null;
   return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold whitespace-nowrap",
-        LIVE_CLS[status] || LIVE_CLS.error,
-      )}
+    <Badge
+      className={cn("rounded-full border-transparent", LIVE_CLS[status] || LIVE_CLS.error)}
       title={detail || ""}
     >
       {LIVE_LABEL[status] || status}
       {checkedAt ? (
         <span className="ml-1 font-normal opacity-70">· {relTime(checkedAt)}</span>
       ) : null}
-    </span>
+    </Badge>
   );
 }
 
@@ -224,28 +224,31 @@ export default function Accounts({ attach, running, navigate }) {
         </CardHeader>
         <CardContent className="space-y-3">
           {takeover.running && (
-            <div className="flex items-center justify-between gap-2 rounded-lg bg-blue-500/15 px-3 py-2 text-sm text-blue-400">
-              <span>正在接管：{takeover.email}</span>
-              <span className="flex items-center gap-2">
-                <Button variant="outline" size="sm" asChild>
-                  <a
-                    href="/vnc/?autoconnect=1&resize=scale"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    打开画面
-                  </a>
-                </Button>
-                <Button variant="outline" size="sm" onClick={stopTakeover}>
-                  结束接管
-                </Button>
-              </span>
-            </div>
+            <Alert className="border-blue-500/30 bg-blue-500/10">
+              <AlertDescription className="flex w-full items-center justify-between gap-2 text-blue-400">
+                <span>正在接管：{takeover.email}</span>
+                <span className="flex items-center gap-2">
+                  <Button variant="outline" size="sm" asChild>
+                    <a
+                      href="/vnc/?autoconnect=1&resize=scale"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      打开画面
+                    </a>
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={stopTakeover}>
+                    结束接管
+                  </Button>
+                </span>
+              </AlertDescription>
+            </Alert>
           )}
           {accounts.length === 0 ? (
             <div className="text-sm text-muted-foreground">暂无账号</div>
           ) : (
-            <ul className="flex max-h-[560px] flex-col gap-1.5 overflow-x-hidden overflow-y-auto">
+            <ScrollArea className="max-h-[560px]">
+              <ul className="flex flex-col gap-1.5 pr-3">
               {accounts.map((a) => (
                 <li key={a.email} className="flex flex-col">
                   <div
@@ -271,7 +274,7 @@ export default function Accounts({ attach, running, navigate }) {
                           </span>
                         ) : null}
                         {a.proxy ? (
-                          <span className="rounded-full border px-1.5 text-[11px]">代理</span>
+                          <Badge variant="outline" className="rounded-full px-1.5 text-[11px]">代理</Badge>
                         ) : null}
                       </span>
                     </span>
@@ -362,7 +365,8 @@ export default function Accounts({ attach, running, navigate }) {
                   )}
                 </li>
               ))}
-            </ul>
+              </ul>
+            </ScrollArea>
           )}
         </CardContent>
       </Card>

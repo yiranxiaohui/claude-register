@@ -5,6 +5,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 export default function Register({ runStream }) {
   const { activeRunId, activeStatus, logLines, attach, streamEpoch } = runStream;
@@ -20,9 +21,8 @@ export default function Register({ runStream }) {
   }, [streamEpoch]);
 
   useEffect(() => {
-    if (logPanelRef.current) {
-      logPanelRef.current.scrollTop = logPanelRef.current.scrollHeight;
-    }
+    const vp = logPanelRef.current?.closest("[data-slot='scroll-area-viewport']");
+    if (vp) vp.scrollTop = vp.scrollHeight;
   }, [logLines]);
 
   async function startRun() {
@@ -78,16 +78,15 @@ export default function Register({ runStream }) {
                   </span>
                   <StatusBadge status={activeStatus} />
                 </div>
-                <div
-                  ref={logPanelRef}
-                  className="log-panel h-64 overflow-y-auto rounded-lg border bg-black/40 p-3 text-muted-foreground"
-                >
-                  {logLines.length === 0 ? (
-                    <div className="text-muted-foreground/60">等待日志输出…</div>
-                  ) : (
-                    logLines.map((line, i) => <div key={i}>{line}</div>)
-                  )}
-                </div>
+                <ScrollArea className="log-panel h-64 rounded-lg border bg-black/40 text-muted-foreground">
+                  <div className="p-3" ref={logPanelRef}>
+                    {logLines.length === 0 ? (
+                      <div className="text-muted-foreground/60">等待日志输出…</div>
+                    ) : (
+                      logLines.map((line, i) => <div key={i}>{line}</div>)
+                    )}
+                  </div>
+                </ScrollArea>
               </div>
             )}
           </CardContent>
@@ -101,7 +100,8 @@ export default function Register({ runStream }) {
             {runs.length === 0 ? (
               <div className="text-sm text-muted-foreground">暂无运行记录</div>
             ) : (
-              <ul className="flex max-h-80 flex-col gap-1.5 overflow-y-auto">
+              <ScrollArea className="max-h-80">
+                <ul className="flex flex-col gap-1.5 pr-3">
                 {runs.map((r) => (
                   <li
                     key={r.id}
@@ -117,7 +117,8 @@ export default function Register({ runStream }) {
                     <StatusBadge status={r.status} />
                   </li>
                 ))}
-              </ul>
+                </ul>
+              </ScrollArea>
             )}
 
             {selectedRun && (
@@ -131,9 +132,9 @@ export default function Register({ runStream }) {
                   </Button>
                 </div>
                 <StatusBadge status={selectedRun.status} />
-                <pre className="log-panel mt-2 max-h-80 overflow-y-auto rounded-lg border bg-black/40 p-3 text-muted-foreground">
-                  {selectedRun.log || "（无日志）"}
-                </pre>
+                <ScrollArea className="log-panel mt-2 max-h-80 rounded-lg border bg-black/40 text-muted-foreground">
+                  <pre className="p-3">{selectedRun.log || "（无日志）"}</pre>
+                </ScrollArea>
                 {selectedRun.screenshots && selectedRun.screenshots.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-2">
                     {selectedRun.screenshots.map((name) => (
