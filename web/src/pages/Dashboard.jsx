@@ -360,73 +360,89 @@ export default function Dashboard() {
         {accounts.length === 0 ? (
           <div className="empty-hint">暂无账号</div>
         ) : (
-          <ul className="list">
+          <ul className="list list-accounts">
             {accounts.map((a) => (
               <li key={a.email} className="list-item">
-                <div className="list-row">
+                <div
+                  className={`list-row${editingEmail === a.email ? " list-row-editing" : ""}`}
+                >
                   <span className="list-main">
-                    <span>{a.email}</span>
+                    <span className="list-email" title={a.email}>
+                      {a.email}
+                    </span>
                     <span className="list-sub">
-                      {a.domain || ""}
-                      {a.session_key
-                        ? ` · sk ${String(a.session_key).slice(0, 12)}…`
-                        : ""}
-                      {a.proxy ? " · proxy" : ""}
-                      {a.display_name ? ` · ${a.display_name}` : ""}
+                      <StatusBadge status={a.status} />
+                      {a.display_name ? <span>{a.display_name}</span> : null}
+                      {a.session_key ? (
+                        <span className="mono">
+                          sk {String(a.session_key).slice(7, 17)}…
+                        </span>
+                      ) : null}
+                      {a.proxy ? <span className="tag">代理</span> : null}
                     </span>
                   </span>
-                  <StatusBadge status={a.status} />
-                  <button className="btn btn-small" onClick={() => copyLine(a)}>
-                    {copiedEmail === a.email ? "已复制" : "复制"}
-                  </button>
-                  <button
-                    className="btn btn-small"
-                    onClick={() =>
-                      editingEmail === a.email
-                        ? setEditingEmail("")
-                        : startEdit(a)
-                    }
-                  >
-                    {editingEmail === a.email ? "收起" : "编辑"}
-                  </button>
-                  <button
-                    className="btn btn-small"
-                    onClick={() => doRerun(a.email)}
-                    disabled={activeStatus === "running"}
-                  >
-                    重跑
-                  </button>
-                  {a.session_key && (
+                  <span className="row-actions">
+                    <button className="btn btn-small" onClick={() => copyLine(a)}>
+                      {copiedEmail === a.email ? "已复制" : "复制"}
+                    </button>
+                    <button
+                      className={`btn btn-small${editingEmail === a.email ? " btn-toggled" : ""}`}
+                      onClick={() =>
+                        editingEmail === a.email
+                          ? setEditingEmail("")
+                          : startEdit(a)
+                      }
+                    >
+                      {editingEmail === a.email ? "收起" : "编辑"}
+                    </button>
                     <button
                       className="btn btn-small"
-                      onClick={() => startTakeover(a.email)}
+                      onClick={() => doRerun(a.email)}
+                      disabled={activeStatus === "running"}
                     >
-                      接管
+                      重跑
                     </button>
-                  )}
+                    {a.session_key && (
+                      <button
+                        className="btn btn-small btn-takeover"
+                        onClick={() => startTakeover(a.email)}
+                      >
+                        接管
+                      </button>
+                    )}
+                  </span>
                 </div>
                 {editingEmail === a.email && (
                   <div className="edit-form">
-                    {[
-                      ["display_name", "备注"],
-                      ["password", "密码"],
-                      ["session_key", "sessionKey"],
-                      ["proxy", "代理（如 socks5://user:pass@host:port）"],
-                    ].map(([key, label]) => (
-                      <label key={key} className="edit-field">
-                        <span className="edit-label">{label}</span>
-                        <input
-                          className="input"
-                          value={editForm[key] ?? ""}
-                          placeholder={label}
-                          onChange={(e) =>
-                            setEditForm((f) => ({ ...f, [key]: e.target.value }))
-                          }
-                        />
-                      </label>
-                    ))}
+                    <div className="edit-grid">
+                      {[
+                        ["display_name", "备注", "给账号起个名字", false],
+                        ["password", "密码", "登录密码", false],
+                        ["session_key", "sessionKey", "sk-ant-sid01-…", true],
+                        ["proxy", "代理", "socks5://user:pass@host:port", true],
+                      ].map(([key, label, hint, wide]) => (
+                        <label
+                          key={key}
+                          className={`edit-field${wide ? " edit-field-wide" : ""}`}
+                        >
+                          <span className="edit-label">{label}</span>
+                          <input
+                            className={`input${wide ? " mono" : ""}`}
+                            value={editForm[key] ?? ""}
+                            placeholder={hint}
+                            spellCheck={false}
+                            onChange={(e) =>
+                              setEditForm((f) => ({
+                                ...f,
+                                [key]: e.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                      ))}
+                    </div>
                     <div className="edit-actions">
-                      <button className="btn btn-small" onClick={saveEdit}>
+                      <button className="btn btn-small btn-save" onClick={saveEdit}>
                         保存
                       </button>
                       <button
@@ -435,6 +451,7 @@ export default function Dashboard() {
                       >
                         取消
                       </button>
+                      <span className="edit-actions-spacer" />
                       <button
                         className="btn btn-small btn-danger"
                         onClick={deleteAccount}

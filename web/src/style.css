@@ -115,7 +115,7 @@ code,
 .main-content {
   flex: 1;
   padding: 24px 28px 40px;
-  max-width: 1200px;
+  max-width: 1440px;
   width: 100%;
   margin: 0 auto;
 }
@@ -125,6 +125,13 @@ code,
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   gap: 20px;
   align-items: start;
+}
+
+/* 宽屏三列：注册表单窄、账号列表宽 */
+@media (min-width: 1200px) {
+  .dashboard-grid {
+    grid-template-columns: 5fr 6fr 8fr;
+  }
 }
 
 /* Cards */
@@ -534,59 +541,156 @@ li.list-row {
   border-color: var(--accent);
 }
 
+.list-accounts {
+  max-height: 520px;
+  overflow-x: hidden;
+}
+
+.list-sub .badge {
+  padding: 1px 7px;
+  font-size: 11px;
+}
+
 .list-item {
   display: flex;
   flex-direction: column;
+}
+
+.list-row-editing {
+  border-color: var(--accent);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.row-actions {
+  display: flex;
   gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-toggled {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.btn-takeover {
+  border-color: rgba(91, 141, 239, 0.5);
+  color: var(--accent-hover);
+}
+
+.btn-save {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-save:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
 }
 
 .edit-form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 14px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid var(--accent);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  animation: edit-reveal 0.18s ease-out;
+  transform-origin: top;
+}
+
+@keyframes edit-reveal {
+  from {
+    opacity: 0;
+    transform: scaleY(0.92) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.edit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
 
 .edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.edit-field-wide {
+  grid-column: 1 / -1;
+}
+
+.edit-label {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.edit-field .input {
+  width: 100%;
+  min-width: 0;
+}
+
+.edit-field .input.mono {
+  font-size: 12px;
+}
+
+.edit-actions {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.edit-label {
-  flex: 0 0 76px;
-  color: var(--text-faint);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.edit-field .input {
+.edit-actions-spacer {
   flex: 1;
-  min-width: 0;
-}
-
-.edit-actions {
-  display: flex;
-  gap: 8px;
 }
 
 .list-main {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
   overflow: hidden;
 }
 
-.list-sub {
-  color: var(--text-faint);
-  font-size: 12px;
+.list-email {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.list-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-faint);
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.list-sub > span {
+  flex-shrink: 0;
+}
+
+.tag {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 /* Run detail */
