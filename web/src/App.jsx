@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
+import { Play, Users, Server, Settings as SettingsIcon } from "lucide-react";
 import { api } from "./api.js";
 import { useRunStream } from "./hooks/useRunStream.js";
+import { cn } from "@/lib/utils";
+import { Toaster } from "@/components/ui/sonner";
 import Login from "./pages/Login.jsx";
 import Register from "./pages/Register.jsx";
 import Accounts from "./pages/Accounts.jsx";
@@ -8,49 +11,10 @@ import Nodes from "./pages/Nodes.jsx";
 import Settings from "./pages/Settings.jsx";
 
 const NAV = [
-  {
-    key: "register",
-    label: "注册",
-    icon: (
-      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polygon points="6 3 20 12 6 21 6 3" />
-      </svg>
-    ),
-  },
-  {
-    key: "accounts",
-    label: "账号",
-    icon: (
-      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-      </svg>
-    ),
-  },
-  {
-    key: "nodes",
-    label: "节点",
-    icon: (
-      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="2" y="2" width="20" height="8" rx="2" />
-        <rect x="2" y="14" width="20" height="8" rx="2" />
-        <line x1="6" y1="6" x2="6.01" y2="6" />
-        <line x1="6" y1="18" x2="6.01" y2="18" />
-      </svg>
-    ),
-  },
-  {
-    key: "settings",
-    label: "设置",
-    icon: (
-      <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-      </svg>
-    ),
-  },
+  { key: "register", label: "注册", Icon: Play },
+  { key: "accounts", label: "账号", Icon: Users },
+  { key: "nodes", label: "节点", Icon: Server },
+  { key: "settings", label: "设置", Icon: SettingsIcon },
 ];
 
 const VIEW_KEYS = NAV.map((n) => n.key);
@@ -84,35 +48,45 @@ export default function App() {
 
   if (authed === null) {
     return (
-      <div className="center-screen">
-        <div className="loading">加载中…</div>
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="text-muted-foreground">加载中…</div>
       </div>
     );
   }
 
   if (!authed) {
-    return <Login onOk={() => setAuthed(true)} />;
+    return (
+      <>
+        <Login onOk={() => setAuthed(true)} />
+        <Toaster position="top-right" />
+      </>
+    );
   }
 
   return (
-    <div className="layout">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
+    <div className="flex min-h-screen max-md:flex-col">
+      <aside className="flex w-52 shrink-0 flex-col gap-1 border-r bg-card px-3 py-5 max-md:w-full max-md:flex-row max-md:items-center max-md:overflow-x-auto max-md:border-r-0 max-md:border-b max-md:px-3 max-md:py-2">
+        <div className="px-3 pb-4 font-bold tracking-wide max-md:whitespace-nowrap max-md:pb-0">
           claude-register
-          <span className="brand-sub">管理面板</span>
+          <span className="block text-[11px] font-normal text-muted-foreground max-md:hidden">
+            管理面板
+          </span>
         </div>
-        {NAV.map((item) => (
+        {NAV.map(({ key, label, Icon }) => (
           <button
-            key={item.key}
-            className={`nav-item${view === item.key ? " active" : ""}`}
-            onClick={() => navigate(item.key)}
+            key={key}
+            onClick={() => navigate(key)}
+            className={cn(
+              "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+              view === key && "bg-accent font-semibold text-foreground",
+            )}
           >
-            {item.icon}
-            <span className="nav-label">{item.label}</span>
+            <Icon className="size-4 shrink-0" />
+            <span className="max-md:hidden">{label}</span>
           </button>
         ))}
       </aside>
-      <main className="content-area">
+      <main className="min-w-0 max-w-5xl flex-1 px-8 py-7 max-md:px-4 max-md:py-4">
         {view === "register" && <Register runStream={runStream} />}
         {view === "accounts" && (
           <Accounts
@@ -124,6 +98,7 @@ export default function App() {
         {view === "nodes" && <Nodes />}
         {view === "settings" && <Settings />}
       </main>
+      <Toaster position="top-right" />
     </div>
   );
 }

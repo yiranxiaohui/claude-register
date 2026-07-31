@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { api } from "../api.js";
-import Toggle from "../components/Toggle.jsx";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 
 const SECRET_PLACEHOLDER = "••••";
 const SECRET_FIELDS = ["panel_password", "anymail_api_key"];
@@ -43,8 +48,7 @@ const OWN_KEYS = GROUPS.flatMap((g) => g.fields.map((f) => f.key));
 export default function Settings() {
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     api
@@ -54,7 +58,7 @@ export default function Settings() {
         for (const k of OWN_KEYS) picked[k] = cfg[k];
         setForm(picked);
       })
-      .catch(() => setError("加载配置失败"));
+      .catch(() => setLoadError("加载配置失败"));
   }, []);
 
   function setField(key, value) {
@@ -64,8 +68,6 @@ export default function Settings() {
   async function save(e) {
     e.preventDefault();
     setSaving(true);
-    setMessage("");
-    setError("");
     const payload = { ...form };
     for (const key of SECRET_FIELDS) {
       if (payload[key] === SECRET_PLACEHOLDER || payload[key] === undefined) {
@@ -77,41 +79,42 @@ export default function Settings() {
       const picked = {};
       for (const k of OWN_KEYS) picked[k] = updated[k];
       setForm(picked);
-      setMessage("已保存");
+      toast.success("已保存");
     } catch {
-      setError("保存失败，请重试");
+      toast.error("保存失败，请重试");
     } finally {
       setSaving(false);
     }
   }
 
-  if (error && !form) return <div className="error-msg">{error}</div>;
-  if (!form) return <div className="empty-hint">加载中…</div>;
+  if (loadError) return <div className="text-sm text-destructive">{loadError}</div>;
+  if (!form) return <div className="text-sm text-muted-foreground">加载中…</div>;
 
   return (
     <>
-      <h1 className="page-title">设置</h1>
-      <form className="settings-form" onSubmit={save}>
+      <h1 className="mb-5 text-xl font-semibold">设置</h1>
+      <form onSubmit={save}>
         {GROUPS.map((group) => (
-          <section className="card settings-group-card" key={group.title}>
-            <h2 className="card-title">{group.title}</h2>
-            <div className="settings-form">
+          <Card className="mb-5" key={group.title}>
+            <CardHeader>
+              <CardTitle>{group.title}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
               {group.fields.map((f) =>
                 f.type === "checkbox" ? (
-                  <div className="form-field-inline" key={f.key}>
-                    <label className="field-label" htmlFor={f.key}>{f.label}</label>
-                    <Toggle
+                  <div className="flex items-center justify-between" key={f.key}>
+                    <Label htmlFor={f.key}>{f.label}</Label>
+                    <Switch
                       id={f.key}
                       checked={!!form[f.key]}
-                      onChange={(v) => setField(f.key, v)}
+                      onCheckedChange={(v) => setField(f.key, v)}
                     />
                   </div>
                 ) : (
-                  <div className="form-field" key={f.key}>
-                    <label className="field-label" htmlFor={f.key}>{f.label}</label>
-                    <input
+                  <div className="space-y-1.5" key={f.key}>
+                    <Label htmlFor={f.key}>{f.label}</Label>
+                    <Input
                       id={f.key}
-                      className="input"
                       type={f.type}
                       placeholder={f.secret ? SECRET_PLACEHOLDER : f.placeholder ?? ""}
                       value={form[f.key] ?? ""}
@@ -127,14 +130,12 @@ export default function Settings() {
                   </div>
                 ),
               )}
-            </div>
-          </section>
+            </CardContent>
+          </Card>
         ))}
-        {message && <div className="success-msg">{message}</div>}
-        {error && <div className="error-msg">{error}</div>}
-        <button className="btn btn-primary" type="submit" disabled={saving}>
+        <Button type="submit" disabled={saving}>
           {saving ? "保存中…" : "保存设置"}
-        </button>
+        </Button>
       </form>
     </>
   );
