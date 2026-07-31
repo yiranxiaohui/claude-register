@@ -343,7 +343,7 @@ export default function Dashboard() {
             <span className="takeover-actions">
               <a
                 className="btn btn-small"
-                href="/vnc/?autoconnect=1"
+                href="/vnc/?autoconnect=1&resize=scale"
                 target="_blank"
                 rel="noopener noreferrer"
               >
