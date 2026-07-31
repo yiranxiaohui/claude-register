@@ -309,7 +309,14 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         if not cfg.panel_password or not auth.verify_token(token, cfg.panel_password, state.secret):
             await ws.close(code=1008)
             return
-        await ws.accept(subprotocol="binary")
+        # 只回显客户端请求过的子协议：noVNC ≥1.6 不请求任何子协议，
+        # 若强行选 binary，浏览器按规范直接断开（表现为"无法连接到服务器"）。
+        offered = [
+            p.strip()
+            for p in ws.headers.get("sec-websocket-protocol", "").split(",")
+            if p.strip()
+        ]
+        await ws.accept(subprotocol="binary" if "binary" in offered else None)
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", 5900)
         except Exception:
