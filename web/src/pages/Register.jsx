@@ -47,8 +47,8 @@ export default function Register({ runStream }) {
 
   return (
     <>
-      <div className="grid items-start gap-5 min-[1200px]:grid-cols-[5fr_7fr]">
-        <Card>
+      <div className="grid items-start gap-5 min-[1200px]:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
+        <Card className="min-w-0">
           <CardHeader>
             <CardTitle>开始注册</CardTitle>
           </CardHeader>
@@ -92,7 +92,7 @@ export default function Register({ runStream }) {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="min-w-0">
           <CardHeader>
             <CardTitle>运行历史</CardTitle>
           </CardHeader>
@@ -133,7 +133,7 @@ export default function Register({ runStream }) {
                 </div>
                 <StatusBadge status={selectedRun.status} />
                 <ScrollArea className="log-panel mt-2 rounded-lg border bg-black/40 text-muted-foreground [&>[data-slot=scroll-area-viewport]]:max-h-80">
-                  <pre className="p-3">{selectedRun.log || "（无日志）"}</pre>
+                  <pre className="p-3 whitespace-pre-wrap break-all">{selectedRun.log || "（无日志）"}</pre>
                 </ScrollArea>
                 {selectedRun.screenshots && selectedRun.screenshots.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-2">
