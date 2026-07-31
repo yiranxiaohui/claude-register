@@ -100,7 +100,7 @@ export default function Register({ runStream }) {
             {runs.length === 0 ? (
               <div className="text-sm text-muted-foreground">暂无运行记录</div>
             ) : (
-              <ScrollArea className="max-h-80">
+              <ScrollArea className="[&>[data-slot=scroll-area-viewport]]:max-h-80">
                 <ul className="flex flex-col gap-1.5 pr-3">
                 {runs.map((r) => (
                   <li
@@ -132,7 +132,7 @@ export default function Register({ runStream }) {
                   </Button>
                 </div>
                 <StatusBadge status={selectedRun.status} />
-                <ScrollArea className="log-panel mt-2 max-h-80 rounded-lg border bg-black/40 text-muted-foreground">
+                <ScrollArea className="log-panel mt-2 rounded-lg border bg-black/40 text-muted-foreground [&>[data-slot=scroll-area-viewport]]:max-h-80">
                   <pre className="p-3">{selectedRun.log || "（无日志）"}</pre>
                 </ScrollArea>
                 {selectedRun.screenshots && selectedRun.screenshots.length > 0 && (
