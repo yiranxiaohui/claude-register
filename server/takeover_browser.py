@@ -13,6 +13,22 @@ from claude_register.browser import build_camoufox_kwargs
 from claude_register.console import log
 
 
+# 接管中继的上游并发上限。注册流程用默认 3（匹配机场硬限额、连接短命周转快），
+# 但接管是交互式浏览：claude.ai 的 HTTP/2 复用连接、SSE 事件流是几分钟不关的
+# 长命连接，槽位按隧道生命周期持有，3 个槽会被前三条长命连接钉死，其余请求
+# 全在本地排队 30s 然后超时（表现为满屏「等待上游并发槽位超时」）。
+DEFAULT_TAKEOVER_MAX_UPSTREAM = 16
+
+
+def takeover_max_upstream() -> int:
+    raw = os.environ.get("TAKEOVER_MAX_UPSTREAM", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_TAKEOVER_MAX_UPSTREAM
+    return value if value > 0 else DEFAULT_TAKEOVER_MAX_UPSTREAM
+
+
 def wait_x_socket(display: str, timeout: float = 10.0, poll: float = 0.1,
                   sock_dir: str = "/tmp/.X11-unix") -> None:
     """轮询等待 Xvfb 的 UNIX socket 出现（display ":100" → 文件 X100）。"""
@@ -41,7 +57,9 @@ class _BrowserHandle:
 
 def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = ":100"):
     """开一个已登录 claude.ai 的 Camoufox（挂在指定 X display 上），返回带 .close() 的句柄。"""
-    kwargs, relay, geoip = build_camoufox_kwargs(proxy or None)
+    kwargs, relay, geoip = build_camoufox_kwargs(
+        proxy or None, max_upstream=takeover_max_upstream()
+    )
     cm = Camoufox(
         headless=False,
         humanize=True,
