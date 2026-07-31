@@ -179,12 +179,17 @@ def validate_proxy(url: str | None) -> dict | None:
     return cfg
 
 
-def build_camoufox_kwargs(proxy: str | None) -> tuple[dict, "SocksRelay | None", str | bool]:
+def build_camoufox_kwargs(
+    proxy: str | None, *, max_upstream: int | None = None
+) -> tuple[dict, "SocksRelay | None", str | bool]:
     """把代理配置转成 Camoufox 的 proxy kwargs，并决定 geoip。
 
     注册会话与接管会话共用这段：解析代理 → 带认证 SOCKS5 起本地中继 →
     用出口 IP 对齐 geoip → 组 kwargs。返回 (kwargs, relay, geoip)，
     relay 需由调用方在会话结束时 stop()。
+
+    max_upstream 透传给中继的上游并发闸门：注册流程不传（用默认 3，匹配
+    机场硬限额）；接管是交互式浏览，长命连接会钉死小闸门，调用方应放宽。
     """
     proxy_cfg = parse_proxy(proxy)
     relay = None
@@ -214,6 +219,7 @@ def build_camoufox_kwargs(proxy: str | None) -> tuple[dict, "SocksRelay | None",
                 relay = SocksRelay(
                     normalize_proxy_url(proxy),
                     on_error=_relay_log,
+                    max_upstream=max_upstream,
                 ).start()
             except Exception as exc:
                 raise RuntimeError(
