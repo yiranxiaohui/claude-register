@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import httpx
 
-from claude_register.browser import normalize_proxy_url
+from claude_register.browser import mask_proxy, normalize_proxy_url
 
 ORG_URL = "https://claude.ai/api/organizations"
 _HEADERS = {
@@ -51,8 +51,8 @@ def check_session(
         return ("error", "无 sessionKey")
     try:
         proxy_url = normalize_proxy_url(proxy)
-    except Exception as exc:  # noqa: BLE001
-        return ("error", f"代理无效：{exc}")
+    except Exception:  # noqa: BLE001
+        return ("error", f"代理无效：{mask_proxy(proxy or '')}")
 
     factory = client_factory or _default_client
     try:

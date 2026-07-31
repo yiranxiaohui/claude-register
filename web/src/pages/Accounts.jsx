@@ -70,7 +70,7 @@ export default function Accounts({ attach, running, navigate }) {
       setAccounts((list) =>
         list.map((a) =>
           a.email === acctEmail
-            ? { ...a, check_status: res.status, checked_at: res.checked_at }
+            ? { ...a, check_status: res.status, checked_at: res.checked_at, check_detail: res.detail }
             : a,
         ),
       );
@@ -230,7 +230,7 @@ export default function Accounts({ attach, running, navigate }) {
                     </span>
                     <span className="list-sub">
                       <StatusBadge status={a.status} />
-                      <LiveBadge status={a.check_status} checkedAt={a.checked_at} />
+                      <LiveBadge status={a.check_status} checkedAt={a.checked_at} detail={a.check_detail} />
                       {a.display_name ? <span>{a.display_name}</span> : null}
                       {a.session_key ? (
                         <span className="mono">

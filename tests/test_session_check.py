@@ -92,3 +92,11 @@ def test_default_client_constructs():
         assert isinstance(client, httpx.Client)
     with _default_client(None) as client:
         assert isinstance(client, httpx.Client)
+
+
+def test_default_client_constructs_socks5():
+    from claude_register.session_check import _default_client
+    import httpx
+    c = _default_client("socks5://u:p@1.2.3.4:1080")
+    assert isinstance(c, httpx.Client)
+    c.close()
