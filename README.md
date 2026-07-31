@@ -44,7 +44,7 @@ docker compose up -d
 - 只经面板 8790 反代，复用面板密码鉴权，**不额外对外开端口**（x11vnc 仅绑 localhost）。
 - 同一时刻只允许一个接管会话；默认空闲 15 分钟自动结束（`config.yaml` 的
   `takeover.idle_timeout_min` 可调，`takeover.enabled: false` 可整体关闭）。
-- 接管会话用独立的虚拟屏（`:100`），与注册流程并行、互不影响。
+- 接管会话用独立的虚拟屏（`:100`，KasmVNC Xvnc），与注册流程（Xvfb）并行、互不影响。
 - sessionKey 是会话级凭证，换环境或过期会失效，接管打不开时重新注册获取即可。
 
 ## 启动（CLI）
