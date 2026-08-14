@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from claude_register import console
 
@@ -63,6 +64,7 @@ class TakeoverManager:
         self._started_at = None
         self._xvnc = None
         self._browser = None
+        self._browser_executor = None
         self._timer = None
 
     def status(self) -> dict:
@@ -96,10 +98,20 @@ class TakeoverManager:
                     "-httpd", KASM_WWW,
                 ])
                 self._wait_display(self.display)
-                self._browser = self._browser_fn(
-                    session_key=session_key, proxy=proxy, display=self.display,
+                # Playwright 的 Sync API 通过线程绑定的 greenlet 驱动事件循环。
+                # FastAPI 的启动、停止请求可能落到不同工作线程，因此浏览器的
+                # 创建和关闭都必须显式派发到同一条专用线程。
+                self._browser_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="takeover-browser",
                 )
+                self._browser = self._browser_executor.submit(
+                    self._browser_fn,
+                    session_key=session_key,
+                    proxy=proxy,
+                    display=self.display,
+                ).result()
             except Exception as exc:  # noqa: BLE001
+                console.log(f"启动接管会话失败：{exc}")
                 self._teardown()
                 raise TakeoverError(f"启动接管会话失败：{exc}") from exc
             self._active = True
@@ -126,12 +138,20 @@ class TakeoverManager:
             self._started_at = None
 
     def _teardown(self):
-        if self._browser is not None:
+        browser = self._browser
+        browser_executor = self._browser_executor
+        self._browser = None
+        self._browser_executor = None
+        if browser is not None:
             try:
-                self._browser.close()
-            except Exception:
-                pass
-            self._browser = None
+                if browser_executor is not None:
+                    browser_executor.submit(browser.close).result()
+                else:
+                    browser.close()
+            except Exception as exc:  # noqa: BLE001
+                console.log(f"关闭接管浏览器失败：{exc}")
+        if browser_executor is not None:
+            browser_executor.shutdown(wait=True, cancel_futures=True)
         if self._xvnc is not None:
             _terminate(self._xvnc)
             self._xvnc = None
