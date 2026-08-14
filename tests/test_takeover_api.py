@@ -13,6 +13,8 @@ def _client(tmp_path, monkeypatch):
             self._running = False
             self._email = None
             self.stops = 0
+            self.relogin_calls = []
+            self.relogin_error = None
             self.web_port = 6901  # KasmVNC 反代路由会读它；测试可改指假上游
         def start(self, *, email, session_key, proxy="", idle_timeout_s=900):
             from server.takeover import TakeoverBusy
@@ -26,8 +28,15 @@ def _client(tmp_path, monkeypatch):
         def status(self):
             return {"running": self._running, "email": self._email,
                     "started_at": "2026-07-30T00:00:00Z" if self._running else None}
+        def relogin(self, **kwargs):
+            from server.takeover import TakeoverError
+            self.relogin_calls.append(kwargs)
+            if self.relogin_error:
+                raise TakeoverError(self.relogin_error)
+            return "sk-new"
 
     monkeypatch.setattr(deps, "TakeoverManager", FakeMgr)
+    monkeypatch.setattr("server.app.check_session", lambda *a, **k: ("alive", "有效"))
     app = create_app(data_dir=tmp_path, config_path=tmp_path / "config.yaml",
                      now_fn=lambda: "2026-07-30T00:00:00Z")
     return app
@@ -37,10 +46,18 @@ def _login(c):
     assert c.post("/api/login", json={"password": "pw"}).status_code == 200
 
 
-def _seed_account(tmp_path, email, session_key="sk", proxy=""):
+def _seed_account(
+    tmp_path,
+    email,
+    session_key="sk",
+    proxy="",
+    mail_key="",
+    mail_base_url="",
+):
     conn = db.init_db(tmp_path / "claude-register.db")
     db.upsert_account(conn, email, "x.com", None, "", None, "success",
-                      session_key=session_key, proxy=proxy, created_at="t")
+                      session_key=session_key, proxy=proxy, created_at="t",
+                      mail_key=mail_key, mail_base_url=mail_base_url)
     conn.commit()
 
 
@@ -86,6 +103,106 @@ def test_takeover_start_stop_status_flow(tmp_path, monkeypatch):
     assert c.post("/api/takeover/start", json={"email": "a@x.com"}).status_code == 409
     assert c.post("/api/takeover/stop").status_code == 200
     assert c.get("/api/takeover").json()["running"] is False
+
+
+def test_takeover_relogin_uses_account_mail_key_and_updates_session(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    _seed_account(
+        tmp_path,
+        "a@x.com",
+        session_key="sk-old",
+        mail_key="ak_child",
+        mail_base_url="https://mail.test",
+    )
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app); _login(c)
+    assert c.post("/api/takeover/start", json={"email": "a@x.com"}).status_code == 200
+
+    r = c.post("/api/takeover/relogin")
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "ok": True,
+        "email": "a@x.com",
+        "check_status": "alive",
+        "check_detail": "有效",
+    }
+    call = app.state.cr.takeover.relogin_calls[0]
+    assert call["mail_api_key"] == "ak_child"
+    assert call["mail_base_url"] == "https://mail.test"
+    account = db.get_account(app.state.cr.conn, "a@x.com")
+    assert account["session_key"] == "sk-new"
+    assert account["check_status"] == "alive"
+
+
+def test_takeover_relogin_falls_back_to_main_mail_credentials(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {
+        "panel_password": "pw",
+        "anymail_api_key": "ak_main",
+        "anymail_base_url": "https://main-mail.test",
+    })
+    _seed_account(tmp_path, "a@x.com")
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app); _login(c)
+    c.post("/api/takeover/start", json={"email": "a@x.com"})
+
+    assert c.post("/api/takeover/relogin").status_code == 200
+    call = app.state.cr.takeover.relogin_calls[0]
+    assert call["mail_api_key"] == "ak_main"
+    assert call["mail_base_url"] == "https://main-mail.test"
+
+
+def test_takeover_relogin_without_active_session_returns_409(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app); _login(c)
+    assert c.post("/api/takeover/relogin").status_code == 409
+
+
+def test_takeover_relogin_failure_does_not_replace_session(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    _seed_account(
+        tmp_path,
+        "a@x.com",
+        session_key="sk-old",
+        mail_key="ak_child",
+        mail_base_url="https://mail.test",
+    )
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app); _login(c)
+    c.post("/api/takeover/start", json={"email": "a@x.com"})
+    app.state.cr.takeover.relogin_error = "账号可能已被封"
+
+    r = c.post("/api/takeover/relogin")
+
+    assert r.status_code == 422
+    assert r.json()["detail"] == "账号可能已被封"
+    assert db.get_account(app.state.cr.conn, "a@x.com")["session_key"] == "sk-old"
+
+
+def test_takeover_relogin_rejects_new_dead_session(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    _seed_account(
+        tmp_path,
+        "a@x.com",
+        session_key="sk-old",
+        mail_key="ak_child",
+        mail_base_url="https://mail.test",
+    )
+    app = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr("server.app.check_session", lambda *a, **k: (
+        "dead", "已失效（HTTP 403）",
+    ))
+    c = TestClient(app); _login(c)
+    c.post("/api/takeover/start", json={"email": "a@x.com"})
+
+    r = c.post("/api/takeover/relogin")
+
+    assert r.status_code == 422
+    assert "仍不可用" in r.json()["detail"]
+    account = db.get_account(app.state.cr.conn, "a@x.com")
+    assert account["session_key"] == "sk-old"
+    assert account["check_status"] == "dead"
 
 
 def test_takeover_stopped_on_server_shutdown(tmp_path, monkeypatch):

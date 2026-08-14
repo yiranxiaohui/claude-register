@@ -9,8 +9,21 @@ import time
 
 from camoufox.sync_api import Camoufox
 
-from claude_register.browser import build_camoufox_kwargs
+from claude_register.anymail import AnyMailClient
+from claude_register.browser import (
+    build_camoufox_kwargs,
+    fill_code,
+    fill_email,
+    hcaptcha_visible,
+    open_login,
+    open_magic_link,
+    wait_code_screen,
+    wait_for_session_key,
+    wait_login_form,
+)
 from claude_register.console import log
+from claude_register.flow import _split_login_timeout
+from claude_register.mailbox import utc_now_iso
 
 
 # 接管中继的上游并发上限。注册流程用默认 3（匹配机场硬限额、连接短命周转快），
@@ -43,9 +56,78 @@ def wait_x_socket(display: str, timeout: float = 10.0, poll: float = 0.1,
 
 
 class _BrowserHandle:
-    def __init__(self, cm, relay):
+    def __init__(self, cm, relay, page):
         self._cm = cm
         self._relay = relay
+        self._page = page
+
+    def relogin(
+        self,
+        *,
+        email: str,
+        mail_base_url: str,
+        mail_api_key: str,
+        login_timeout: float,
+    ) -> str:
+        """在当前接管页请求新登录邮件并返回新的 sessionKey。
+
+        该方法由 TakeoverManager 固定派发到创建浏览器的专用线程，不能从
+        FastAPI 请求线程直接调用，否则会破坏 Playwright Sync API 的线程绑定。
+        """
+        page = self._page
+        client = AnyMailClient(base_url=mail_base_url, api_key=mail_api_key)
+        since = utc_now_iso()
+
+        # 旧 cookie 正是本次重新登录的原因。先删掉，避免后续读取时把它误认成
+        # 魔术链接刚换回来的新 sessionKey。
+        try:
+            page.context.clear_cookies(name="sessionKey")
+        except TypeError:
+            # 兼容不支持按 name 清理的旧 Playwright/Camoufox 版本。
+            page.context.clear_cookies()
+
+        log(f"接管浏览器开始为 {email} 重新自动登录。")
+        open_login(page)
+        wait_login_form(page)
+        fill_email(page, email)
+
+        link_timeout, fallback_timeout = _split_login_timeout(login_timeout)
+        link = client.poll_magic_link(
+            to=email,
+            since=since,
+            timeout=link_timeout,
+        )
+        code = None
+        if link is None:
+            log(f"未收到登录链接，改试 6 位验证码（最多 {fallback_timeout:.0f}s）。")
+            screen_ok = wait_code_screen(page)
+            code = client.poll_code(
+                to=email,
+                since=since,
+                timeout=fallback_timeout,
+            )
+
+        if link:
+            if not open_magic_link(page, link):
+                raise RuntimeError("已收到登录链接，但在接管浏览器中打开失败")
+        elif code:
+            if not screen_ok:
+                raise RuntimeError("已收到验证码，但接管浏览器未进入验证码页面")
+            if not fill_code(page, code):
+                raise RuntimeError("已收到验证码，但自动填写或提交失败")
+            page.wait_for_timeout(3_000)
+            if hcaptcha_visible(page):
+                raise RuntimeError("验证码登录触发 hCaptcha，请在接管画面中手动完成")
+        else:
+            raise RuntimeError("等待登录邮件超时")
+
+        # 接管只允许已有 sessionKey 的老账号启动，因此重新登录无需再跑注册
+        # onboarding；新 cookie 才是是否恢复成功的最终判据。
+        session_key = wait_for_session_key(page, timeout_ms=30_000)
+        if not session_key:
+            raise RuntimeError("未取得新的 sessionKey；账号可能已被封或登录未完成")
+        log(f"接管浏览器已为 {email} 重新登录并取得新 sessionKey。")
+        return session_key
 
     def close(self):
         try:
@@ -95,4 +177,4 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
         if relay is not None:
             relay.stop()
         raise RuntimeError(f"注入 sessionKey / 打开 claude.ai 失败（{exc}）。") from exc
-    return _BrowserHandle(cm, relay)
+    return _BrowserHandle(cm, relay, page)

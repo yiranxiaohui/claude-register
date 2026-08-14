@@ -65,6 +65,7 @@ function LiveBadge({ status, checkedAt, detail }) {
 export default function Accounts({ attach, running, navigate }) {
   const [accounts, setAccounts] = useState([]);
   const [takeover, setTakeover] = useState({ running: false, email: null });
+  const [relogging, setRelogging] = useState(false);
   const [checking, setChecking] = useState("");
   const [copiedEmail, setCopiedEmail] = useState("");
   const [editingEmail, setEditingEmail] = useState("");
@@ -162,6 +163,30 @@ export default function Accounts({ attach, running, navigate }) {
     }
   };
 
+  const reloginTakeover = async () => {
+    setRelogging(true);
+    try {
+      const res = await api.takeoverRelogin();
+      refreshLists();
+      toast.success(
+        res.check_status === "alive"
+          ? `「${res.email}」已重新登录并更新 sessionKey`
+          : `「${res.email}」已更新 sessionKey，但存活检测暂时失败`,
+      );
+    } catch (e) {
+      const detail = e.body?.detail;
+      toast.error(
+        e.status === 409
+          ? "当前没有活动的接管会话"
+          : e.status === 422
+            ? detail || "重新登录失败，账号可能已被封"
+            : detail || `重新登录失败（${e.status || "?"}）`,
+      );
+    } finally {
+      setRelogging(false);
+    }
+  };
+
   const startEdit = (a) => {
     setEditingEmail(a.email);
     setEditForm({
@@ -237,7 +262,20 @@ export default function Accounts({ attach, running, navigate }) {
                       打开画面
                     </a>
                   </Button>
-                  <Button variant="outline" size="sm" onClick={stopTakeover}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={reloginTakeover}
+                    disabled={relogging}
+                  >
+                    {relogging ? "重新登录中…" : "重新自动登录"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={stopTakeover}
+                    disabled={relogging}
+                  >
                     结束接管
                   </Button>
                 </span>
