@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Register 接管</title>
+    <style>
+      html, body, iframe { width: 100%; height: 100%; margin: 0; border: 0; }
+      body { overflow: hidden; background: #111827; color: #f9fafb; font-family: sans-serif; }
+      #notice {
+        position: fixed; inset: 0; z-index: 10; display: none; place-items: center;
+        background: rgba(17, 24, 39, .92); text-align: center;
+      }
+      #notice.visible { display: grid; }
+      button {
+        margin-top: 16px; padding: 8px 16px; border: 1px solid #6b7280; border-radius: 6px;
+        background: #1f2937; color: inherit; cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <iframe
+      id="viewer"
+      src="/vnc/?autoconnect=1&amp;resize=scale"
+      title="KasmVNC 接管画面"
+      allow="clipboard-read; clipboard-write"
+      allowfullscreen
+    ></iframe>
+    <div id="notice">
+      <div>
+        <div id="message">接管会话已断开</div>
+        <button id="reload" type="button">重新加载</button>
+      </div>
+    </div>
+    <script>
+      const notice = document.getElementById("notice");
+      const message = document.getElementById("message");
+      let heartbeatTimer;
+
+      async function heartbeat() {
+        try {
+          const response = await fetch("/api/takeover/heartbeat", {
+            method: "POST",
+            credentials: "same-origin",
+          });
+          if (response.ok) return;
+          if (response.status === 401 || response.status === 409) {
+            message.textContent = response.status === 401
+              ? "面板登录已失效，请重新登录"
+              : "接管会话已结束";
+            notice.classList.add("visible");
+            clearInterval(heartbeatTimer);
+          }
+        } catch {
+          // 短暂网络中断不立即终止会话；下一轮心跳会自动重试。
+        }
+      }
+
+      document.getElementById("reload").addEventListener("click", () => {
+        window.location.reload();
+      });
+      window.addEventListener("online", heartbeat);
+      heartbeatTimer = setInterval(heartbeat, 20_000);
+      heartbeat();
+    </script>
+  </body>
+</html>

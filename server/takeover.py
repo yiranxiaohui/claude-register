@@ -4,7 +4,7 @@
 自选屏，接管用 KasmVNC 的 Xvnc 直接当 :100 的 X 服务器（自带 Web 客户端与
 websocket 推流，比 Xvfb+x11vnc+noVNC 三件套流畅得多，进程也从两个减到一个）。
 单例：同一时刻只允许一个接管会话。Xvnc 只绑 localhost，不对外暴露端口，
-由面板反代（server/app.py 的 /vnc/*）复用密码鉴权。
+由同容器 Nginx 直接反代，并通过 FastAPI auth_request 复用面板鉴权。
 """
 from __future__ import annotations
 
@@ -66,6 +66,8 @@ class TakeoverManager:
         self._browser = None
         self._browser_executor = None
         self._timer = None
+        self._timer_generation = 0
+        self._idle_timeout_s = 0.0
 
     def status(self) -> dict:
         with self._lock:
@@ -118,10 +120,27 @@ class TakeoverManager:
             self._email = email
             self._started_at = self.now_fn()
             console.log(f"接管会话已启动：{email}")
-            self._timer = threading.Timer(idle_timeout_s, self._idle_stop)
-            self._timer.daemon = True
-            self._timer.start()
+            self._idle_timeout_s = float(idle_timeout_s)
+            self._arm_idle_timer_locked()
             return {"email": email, "started_at": self._started_at}
+
+    def _arm_idle_timer_locked(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+        self._timer_generation += 1
+        generation = self._timer_generation
+        self._timer = threading.Timer(
+            self._idle_timeout_s, self._idle_stop, args=(generation,),
+        )
+        self._timer.daemon = True
+        self._timer.start()
+
+    def touch(self) -> None:
+        """续期活动接管会话的空闲回收计时器。"""
+        with self._lock:
+            if not self._active:
+                raise TakeoverError("当前没有活动的接管会话")
+            self._arm_idle_timer_locked()
 
     def relogin(self, **kwargs) -> str:
         """在活动接管浏览器所属线程执行一次自动重新登录。"""
@@ -139,19 +158,26 @@ class TakeoverManager:
                 console.log(f"接管浏览器重新登录失败：{exc}")
                 raise TakeoverError(str(exc)) from exc
 
-    def _idle_stop(self):
-        console.log("接管会话空闲超时，自动结束。")
-        self.stop()
+    def _idle_stop(self, generation: int):
+        with self._lock:
+            # cancel() 与回调启动可能竞争；旧一代计时器不得关闭
+            # 已经被心跳续期的会话。
+            if not self._active or generation != self._timer_generation:
+                return
+            console.log("接管会话空闲超时，自动结束。")
+            self.stop()
 
     def stop(self) -> None:
         with self._lock:
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+            self._timer_generation += 1
             self._teardown()
             self._active = False
             self._email = None
             self._started_at = None
+            self._idle_timeout_s = 0.0
 
     def _teardown(self):
         browser = self._browser

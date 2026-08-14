@@ -190,7 +190,7 @@ def test_browser_lifecycle_stays_on_one_thread_across_request_workers():
     )
 
 
-def test_idle_timeout_auto_stops():
+def test_idle_timeout_auto_stops_without_heartbeat():
     m = _mgr()
     m.start(email="a@x.com", session_key="sk", idle_timeout_s=0.05)
     for _ in range(50):
@@ -198,6 +198,27 @@ def test_idle_timeout_auto_stops():
             break
         threading.Event().wait(0.02)
     assert m.status()["running"] is False
+
+
+def test_heartbeat_extends_idle_timeout():
+    m = _mgr()
+    m.start(email="a@x.com", session_key="sk", idle_timeout_s=0.08)
+    threading.Event().wait(0.05)
+    m.touch()
+    threading.Event().wait(0.05)
+    assert m.status()["running"] is True
+
+    for _ in range(20):
+        if not m.status()["running"]:
+            break
+        threading.Event().wait(0.02)
+    assert m.status()["running"] is False
+
+
+def test_heartbeat_requires_active_session():
+    m = _mgr()
+    with pytest.raises(TakeoverError, match="没有活动"):
+        m.touch()
 
 
 def test_wait_x_socket_times_out_fast(tmp_path):
