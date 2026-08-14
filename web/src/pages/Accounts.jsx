@@ -255,7 +255,7 @@ export default function Accounts({ attach, running, navigate }) {
                 <span className="flex items-center gap-2">
                   <Button variant="outline" size="sm" asChild>
                     <a
-                      href="/vnc/?autoconnect=1&resize=scale"
+                      href="/takeover.html"
                       target="_blank"
                       rel="noopener noreferrer"
                     >

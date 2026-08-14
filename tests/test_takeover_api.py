@@ -14,9 +14,9 @@ def _client(tmp_path, monkeypatch):
             self._running = False
             self._email = None
             self.stops = 0
+            self.touches = 0
             self.relogin_calls = []
             self.relogin_error = None
-            self.web_port = 6901  # KasmVNC 反代路由会读它；测试可改指假上游
         def start(self, *, email, session_key, proxy="", idle_timeout_s=900):
             from server.takeover import TakeoverBusy
             if self._running:
@@ -29,6 +29,11 @@ def _client(tmp_path, monkeypatch):
         def status(self):
             return {"running": self._running, "email": self._email,
                     "started_at": "2026-07-30T00:00:00Z" if self._running else None}
+        def touch(self):
+            from server.takeover import TakeoverError
+            if not self._running:
+                raise TakeoverError("当前没有活动的接管会话")
+            self.touches += 1
         def relogin(self, **kwargs):
             from server.takeover import TakeoverError
             self.relogin_calls.append(kwargs)
@@ -335,71 +340,34 @@ def test_takeover_stopped_on_server_shutdown(tmp_path, monkeypatch):
     assert mgr.stops >= 1
 
 
-def test_vnc_http_requires_auth_and_502_without_upstream(tmp_path, monkeypatch):
+def test_vnc_auth_reuses_panel_cookie(tmp_path, monkeypatch):
     save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
     app = _client(tmp_path, monkeypatch)
     c = TestClient(app)
-    assert c.get("/vnc/").status_code == 401
+    assert c.get("/api/vnc-auth").status_code == 401
     _login(c)
-    # KasmVNC 没在跑（接管未启动）→ 明确 502 而不是挂起
-    app.state.cr.takeover.web_port = 1  # 保证连不上
-    assert c.get("/vnc/").status_code == 502
+    assert c.get("/api/vnc-auth").status_code == 204
 
 
-def test_vnc_http_proxies_to_kasm(tmp_path, monkeypatch):
-    import http.server, threading
+def test_takeover_heartbeat_requires_auth(tmp_path, monkeypatch):
     save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
     app = _client(tmp_path, monkeypatch)
-
-    class H(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            body = f"kasm:{self.path}".encode()
-            self.send_response(200)
-            self.send_header("content-type", "text/html")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        def log_message(self, *a):
-            pass
-
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        app.state.cr.takeover.web_port = srv.server_address[1]
-        c = TestClient(app); _login(c)
-        r = c.get("/vnc/")
-        assert r.status_code == 200 and r.text == "kasm:/"
-        r = c.get("/vnc/assets/app.js")
-        assert r.status_code == 200 and r.text == "kasm:/assets/app.js"
-    finally:
-        srv.shutdown()
+    c = TestClient(app)
+    assert c.post("/api/takeover/heartbeat").status_code == 401
 
 
-def test_vnc_http_blocks_traversal(tmp_path, monkeypatch):
+def test_takeover_heartbeat_renews_running_session(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    _seed_account(tmp_path, "a@x.com")
+    app = _client(tmp_path, monkeypatch)
+    c = TestClient(app); _login(c)
+    assert c.post("/api/takeover/start", json={"email": "a@x.com"}).status_code == 200
+    assert c.post("/api/takeover/heartbeat").json() == {"ok": True}
+    assert app.state.cr.takeover.touches == 1
+
+
+def test_takeover_heartbeat_without_running_session_returns_409(tmp_path, monkeypatch):
     save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
     app = _client(tmp_path, monkeypatch)
     c = TestClient(app); _login(c)
-    assert c.get("/vnc/..%2f..%2fetc%2fpasswd").status_code == 404
-
-
-def test_vnc_ws_rejects_without_cookie(tmp_path, monkeypatch):
-    import pytest
-    from starlette.websockets import WebSocketDisconnect
-    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
-    app = _client(tmp_path, monkeypatch)
-    c = TestClient(app)
-    with pytest.raises(WebSocketDisconnect):
-        with c.websocket_connect("/vnc/websockify") as ws:
-            ws.receive_bytes()
-
-
-def test_vnc_ws_default_websockify_path(tmp_path, monkeypatch):
-    """noVNC ≥1.5 忽略 URL path 参数、连默认 /websockify：必须命中 WS 桥而非 StaticFiles。"""
-    import pytest
-    from starlette.websockets import WebSocketDisconnect
-    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
-    app = _client(tmp_path, monkeypatch)
-    c = TestClient(app)
-    with pytest.raises(WebSocketDisconnect):
-        with c.websocket_connect("/websockify") as ws:
-            ws.receive_bytes()
+    assert c.post("/api/takeover/heartbeat").status_code == 409

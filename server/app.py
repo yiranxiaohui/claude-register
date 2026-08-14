@@ -6,7 +6,7 @@ import hmac
 import httpx
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -421,105 +421,19 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     def takeover_status(_=Depends(require_auth)):
         return state.takeover.status()
 
-    # ---- KasmVNC 反代（HTTP 资源 + websocket 推流都过面板，复用密码鉴权）----
-    # Xvnc 只绑 127.0.0.1:<web_port>，外界唯一入口是这里。端口每次请求时从
-    # manager 读：测试里可以把它指到假上游。
-    def _kasm_base() -> str:
-        return f"http://127.0.0.1:{state.takeover.web_port}"
+    @app.get("/api/vnc-auth", status_code=204)
+    def vnc_auth(_=Depends(require_auth)):
+        """Nginx auth_request 子请求：复用面板 Cookie 保护 KasmVNC。"""
+        return Response(status_code=204)
 
-    @app.get("/vnc/{path:path}")
-    async def vnc_http(path: str, _=Depends(require_auth)):
-        if ".." in path:
-            raise HTTPException(status_code=404)
-        base = _kasm_base()
-        url = f"{base}/{path}" if path else f"{base}/"
+    @app.post("/api/takeover/heartbeat")
+    def takeover_heartbeat(_=Depends(require_auth)):
+        """接管页存活心跳；只要页面在线就续期回收计时器。"""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(url)
-        except Exception:
-            raise HTTPException(
-                status_code=502, detail="KasmVNC 未运行，请先启动接管会话"
-            )
-        return Response(
-            r.content,
-            status_code=r.status_code,
-            media_type=r.headers.get("content-type"),
-        )
-
-    # 旧版 noVNC 客户端会按页面路径解析出 /vnc/websockify，直连 /websockify 的
-    # 老书签也兼容；两个路径都桥到 KasmVNC 的 websocket。
-    @app.websocket("/websockify")
-    @app.websocket("/vnc/websockify")
-    async def vnc_ws(ws: WebSocket):
-        cfg = state.config()
-        token = ws.cookies.get(auth.COOKIE_NAME, "")
-        if not cfg.panel_password or not auth.verify_token(token, cfg.panel_password, state.secret):
-            await ws.close(code=1008)
-            return
-        # 子协议：把客户端请求的原样递给上游，再把上游选中的回给客户端
-        # （KasmVNC 自家客户端请求 binary；选了客户端没请求的子协议会被浏览器断开）。
-        offered = [
-            p.strip()
-            for p in ws.headers.get("sec-websocket-protocol", "").split(",")
-            if p.strip()
-        ]
-        try:
-            import websockets
-
-            upstream = await websockets.connect(
-                f"ws://127.0.0.1:{state.takeover.web_port}/websockify",
-                subprotocols=offered or None,
-                # KasmVNC 校验 Origin 头，缺了直接 404
-                additional_headers={"Origin": _kasm_base()},
-                open_timeout=8,
-                max_size=None,
-            )
-        except Exception:
-            await ws.close(code=1011)
-            return
-        await ws.accept(subprotocol=upstream.protocol.subprotocol)
-
-        async def client_to_kasm():
-            try:
-                while True:
-                    msg = await ws.receive()
-                    if msg.get("bytes") is not None:
-                        await upstream.send(msg["bytes"])
-                    elif msg.get("text") is not None:
-                        await upstream.send(msg["text"])
-                    else:  # disconnect
-                        break
-            except Exception:
-                pass
-
-        async def kasm_to_client():
-            try:
-                async for data in upstream:
-                    if isinstance(data, bytes):
-                        await ws.send_bytes(data)
-                    else:
-                        await ws.send_text(data)
-            except Exception:
-                pass
-
-        tasks = [
-            asyncio.create_task(client_to_kasm()),
-            asyncio.create_task(kasm_to_client()),
-        ]
-        try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            try:
-                await upstream.close()
-            except Exception:
-                pass
-            try:
-                await ws.close()
-            except Exception:
-                pass
+            state.takeover.touch()
+        except TakeoverError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True}
 
     # 截图/日志工件：必须鉴权 + 防路径穿越（不能用裸 StaticFiles，mount 不继承 Depends）
     runs_dir = state.data_dir / "runs"
@@ -537,7 +451,7 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
 
     @app.on_event("shutdown")
     def _cleanup_takeover():
-        # server 关闭/重启时兜底清理接管会话，避免 Xvfb/x11vnc/浏览器变孤儿进程。
+        # server 关闭/重启时兜底清理接管会话，避免 Xvnc/浏览器变孤儿进程。
         # stop() 幂等，没在跑也安全。
         state.takeover.stop()
 

@@ -38,6 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxi6 \
     fonts-liberation \
     fonts-unifont \
+    nginx \
+    supervisor \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 # KasmVNC：接管会话的 X 服务器 + Web 客户端 + websocket 推流（替代 x11vnc+noVNC）。
@@ -55,8 +57,12 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY claude_register/ ./claude_register/
 COPY server/ ./server/
 COPY serve.py main.py README.md ./
+COPY deploy/nginx.conf /etc/nginx/nginx.conf
+COPY deploy/supervisord.conf /etc/supervisor/conf.d/claude-register.conf
+RUN nginx -t
 RUN uv sync --frozen --no-dev
 COPY --from=web /web/dist ./web/dist
 RUN uv run camoufox fetch
+ENV CLAUDE_REGISTER_INTERNAL_PORT=8791
 EXPOSE 8790
-CMD ["uv", "run", "python", "serve.py"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/claude-register.conf"]
