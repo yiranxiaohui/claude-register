@@ -97,6 +97,56 @@ def test_stop_is_idempotent():
     assert m.status()["running"] is False
 
 
+def test_browser_lifecycle_stays_on_one_thread_across_request_workers():
+    """启动和停止可来自不同 API 工作线程，但 Playwright 必须留在同一线程。"""
+    browsers = []
+    start_errors = []
+
+    class ThreadBoundBrowser:
+        def __init__(self):
+            self.owner_thread = threading.get_ident()
+            self.close_thread = None
+            self.closed = False
+
+        def close(self):
+            self.close_thread = threading.get_ident()
+            if self.close_thread != self.owner_thread:
+                raise RuntimeError("browser closed from a different thread")
+            self.closed = True
+
+    def browser_fn(**kwargs):
+        browser = ThreadBoundBrowser()
+        browsers.append(browser)
+        return browser
+
+    m = _mgr(browser_fn=browser_fn)
+
+    # 连续两轮模拟异步 start 路由的 asyncio.to_thread 工作线程；stop 则由
+    # 当前线程调用。旧实现首轮跨线程关闭失败，第二轮会撞上残留的事件循环。
+    for cycle in (1, 2):
+        def start_from_worker():
+            try:
+                m.start(
+                    email=f"a{cycle}@x.com", session_key="sk", idle_timeout_s=999,
+                )
+            except Exception as exc:  # pragma: no cover - asserted below
+                start_errors.append(exc)
+
+        start_thread = threading.Thread(target=start_from_worker)
+        start_thread.start()
+        start_thread.join(timeout=5)
+
+        assert not start_thread.is_alive()
+        assert start_errors == []
+        m.stop()
+
+    assert len(browsers) == 2
+    assert all(browser.closed for browser in browsers)
+    assert all(
+        browser.close_thread == browser.owner_thread for browser in browsers
+    )
+
+
 def test_idle_timeout_auto_stops():
     m = _mgr()
     m.start(email="a@x.com", session_key="sk", idle_timeout_s=0.05)
