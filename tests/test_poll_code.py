@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from claude_register.anymail import extract_code
+from claude_register.anymail import AnyMailAccessError, extract_code
 from claude_register.config import DEFAULT_CODE_REGEX, FALLBACK_CODE_REGEX
 
 LATEST = "https://mail.test/api/emails/latest"
@@ -286,3 +286,20 @@ def test_poll_code_fatal_errors_raise_immediately(client, status):
             monotonic=clock.monotonic,
         )
     assert clock.slept == []  # 不该退避重试
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [401, 403])
+def test_check_email_access_raises_typed_credential_error(client, status):
+    route = respx.get(LATEST).mock(
+        return_value=httpx.Response(status, json={"error": "credential rejected"})
+    )
+
+    with pytest.raises(AnyMailAccessError) as exc_info:
+        client.check_email_access(to="a@mail.test")
+
+    assert exc_info.value.status_code == status
+    params = route.calls.last.request.url.params
+    assert params["to"] == "a@mail.test"
+    assert params["code_regex"] == ""
+    assert params["limit"] == "1"

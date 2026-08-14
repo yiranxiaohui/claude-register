@@ -83,6 +83,19 @@ class ChildKey:
 FATAL_STATUSES = frozenset({400, 401, 403})
 
 
+class AnyMailAccessError(RuntimeError):
+    """API Key 无效或无读信权限；调用方可换一把凭据后立即重试。"""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        self.status_code = status_code
+        self.detail = detail
+        if status_code == 401:
+            hint = "API Key 不存在、已被撤销或已失效"
+        else:
+            hint = "API Key 缺少 emails:read scope，或无权读取该邮箱"
+        super().__init__(f"AnyMail 接码失败 {status_code}: {detail}\n{hint}。")
+
+
 def extract_code(email: dict[str, Any], regex: str) -> str | None:
     """在 subject / text_body / html_body 里找验证码。
 
@@ -366,10 +379,12 @@ class AnyMailClient:
                 headers=self._headers(),
                 params=params,
             )
+            if resp.status_code in (401, 403):
+                raise AnyMailAccessError(resp.status_code, resp.text[:300])
             if resp.status_code in FATAL_STATUSES:
                 raise RuntimeError(
                     f"AnyMail 接码失败 {resp.status_code}: {resp.text[:300]}\n"
-                    "请确认 API Key 含 emails:read scope，且 code_regex 语法正确。"
+                    "请确认 code_regex 语法正确。"
                 )
             if resp.status_code >= 400:
                 # 5xx：交给调用方指数退避
@@ -391,6 +406,11 @@ class AnyMailClient:
 
         emails = data.get("emails") if isinstance(data, dict) else None
         return [e for e in emails if isinstance(e, dict)] if isinstance(emails, list) else []
+
+    def check_email_access(self, *, to: str) -> None:
+        """只读探测当前 Key 能否读取指定邮箱，不等待或消费邮件。"""
+        since = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._fetch_latest(to=to, since=since, code_regex="", limit=1)
 
     def poll_code(
         self,

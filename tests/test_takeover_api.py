@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from claude_register.anymail import AnyMailAccessError, ChildKey
 from server.app import create_app
 from server.config_store import save_config
 from server import db
@@ -37,8 +38,32 @@ def _client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(deps, "TakeoverManager", FakeMgr)
     monkeypatch.setattr("server.app.check_session", lambda *a, **k: ("alive", "有效"))
+
+    mail_control = {
+        "invalid_keys": set(),
+        "child": None,
+        "checks": [],
+        "creates": [],
+    }
+
+    class FakeMailClient:
+        def __init__(self, *, base_url, api_key):
+            self.base_url = base_url
+            self.api_key = api_key
+
+        def check_email_access(self, *, to):
+            mail_control["checks"].append((self.base_url, self.api_key, to))
+            if self.api_key in mail_control["invalid_keys"]:
+                raise AnyMailAccessError(401, '{"error":"invalid or expired api key"}')
+
+        def create_child_key(self, **kwargs):
+            mail_control["creates"].append(kwargs)
+            return mail_control["child"]
+
+    monkeypatch.setattr("server.app.AnyMailClient", FakeMailClient)
     app = create_app(data_dir=tmp_path, config_path=tmp_path / "config.yaml",
                      now_fn=lambda: "2026-07-30T00:00:00Z")
+    app.state.mail_control = mail_control
     return app
 
 
@@ -150,6 +175,100 @@ def test_takeover_relogin_falls_back_to_main_mail_credentials(tmp_path, monkeypa
     call = app.state.cr.takeover.relogin_calls[0]
     assert call["mail_api_key"] == "ak_main"
     assert call["mail_base_url"] == "https://main-mail.test"
+
+
+def test_takeover_relogin_repairs_invalid_child_key_permanently(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {
+        "panel_password": "pw",
+        "anymail_api_key": "ak_main",
+        "anymail_base_url": "https://main-mail.test",
+    })
+    _seed_account(
+        tmp_path,
+        "a@x.com",
+        mail_key="ak_stale",
+        mail_base_url="https://old-mail.test",
+    )
+    app = _client(tmp_path, monkeypatch)
+    app.state.mail_control["invalid_keys"].add("ak_stale")
+    app.state.mail_control["child"] = ChildKey(
+        id="kid-new",
+        plaintext="ak_repaired",
+    )
+    c = TestClient(app); _login(c)
+    c.post("/api/takeover/start", json={"email": "a@x.com"})
+
+    r = c.post("/api/takeover/relogin")
+
+    assert r.status_code == 200
+    assert app.state.mail_control["checks"] == [
+        ("https://old-mail.test", "ak_stale", "a@x.com"),
+        ("https://main-mail.test", "ak_main", "a@x.com"),
+    ]
+    assert app.state.mail_control["creates"] == [{
+        "email": "a@x.com",
+        "expires_at": None,
+        "name_prefix": "claude-register-relogin",
+    }]
+    call = app.state.cr.takeover.relogin_calls[0]
+    assert call["mail_api_key"] == "ak_repaired"
+    assert call["mail_base_url"] == "https://main-mail.test"
+    account = db.get_account(app.state.cr.conn, "a@x.com")
+    assert account["mail_key"] == "ak_repaired"
+    assert account["mail_base_url"] == "https://main-mail.test"
+
+
+def test_takeover_relogin_clears_invalid_child_when_delegation_unavailable(
+    tmp_path, monkeypatch
+):
+    save_config(tmp_path / "config.yaml", {
+        "panel_password": "pw",
+        "anymail_api_key": "ak_main",
+        "anymail_base_url": "https://main-mail.test",
+    })
+    _seed_account(
+        tmp_path,
+        "a@x.com",
+        mail_key="ak_stale",
+        mail_base_url="https://old-mail.test",
+    )
+    app = _client(tmp_path, monkeypatch)
+    app.state.mail_control["invalid_keys"].add("ak_stale")
+    c = TestClient(app); _login(c)
+    c.post("/api/takeover/start", json={"email": "a@x.com"})
+
+    assert c.post("/api/takeover/relogin").status_code == 200
+
+    call = app.state.cr.takeover.relogin_calls[0]
+    assert call["mail_api_key"] == "ak_main"
+    assert call["mail_base_url"] == "https://main-mail.test"
+    account = db.get_account(app.state.cr.conn, "a@x.com")
+    assert account["mail_key"] == ""
+    assert account["mail_base_url"] == ""
+
+
+def test_takeover_relogin_reports_invalid_main_key_during_repair(tmp_path, monkeypatch):
+    save_config(tmp_path / "config.yaml", {
+        "panel_password": "pw",
+        "anymail_api_key": "ak_main_bad",
+        "anymail_base_url": "https://main-mail.test",
+    })
+    _seed_account(
+        tmp_path,
+        "a@x.com",
+        mail_key="ak_stale",
+        mail_base_url="https://old-mail.test",
+    )
+    app = _client(tmp_path, monkeypatch)
+    app.state.mail_control["invalid_keys"].update({"ak_stale", "ak_main_bad"})
+    c = TestClient(app); _login(c)
+    c.post("/api/takeover/start", json={"email": "a@x.com"})
+
+    r = c.post("/api/takeover/relogin")
+
+    assert r.status_code == 422
+    assert "主凭据也无法读取邮箱" in r.json()["detail"]
+    assert app.state.cr.takeover.relogin_calls == []
 
 
 def test_takeover_relogin_without_active_session_returns_409(tmp_path, monkeypatch):

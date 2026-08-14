@@ -13,6 +13,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from claude_register import flow
 from claude_register.accounts import AccountRecord
+from claude_register.anymail import AnyMailAccessError, AnyMailClient
+from claude_register.console import log
 from claude_register.proxy_pool import ProxyPool, XuiNode
 from claude_register.session_check import check_session
 from claude_register.xui import XuiClient
@@ -308,7 +310,8 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="账号不存在")
 
         cfg = state.config()
-        if row.get("mail_key") and row.get("mail_base_url"):
+        using_saved_mail_key = bool(row.get("mail_key") and row.get("mail_base_url"))
+        if using_saved_mail_key:
             mail_api_key = str(row["mail_key"])
             mail_base_url = str(row["mail_base_url"])
         else:
@@ -319,6 +322,67 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
                 status_code=400,
                 detail="该账号没有可用的收件凭据，且未配置 AnyMail 主凭据",
             )
+
+        # 账号记录优先保存一把仅能读取本邮箱的永久子 Key。AnyMail 数据库重置、
+        # 父 Key 被删除（会级联删除子 Key）等情况会让这把旧 Key 返回 401；先做
+        # 一次只读探测，确认失效后用当前主 Key 重新派生并写回，让旧账号自愈。
+        if using_saved_mail_key:
+            try:
+                saved_client = AnyMailClient(
+                    base_url=mail_base_url,
+                    api_key=mail_api_key,
+                )
+                await asyncio.to_thread(saved_client.check_email_access, to=email)
+            except httpx.HTTPError as exc:
+                # 临时网络/服务端故障交给真正的接码轮询按原逻辑退避，不误判 Key 失效。
+                log(f"AnyMail 子 Key 探测暂时失败（{exc}），继续使用原凭据。")
+            except (AnyMailAccessError, ValueError) as saved_exc:
+                if not cfg.anymail_api_key or not cfg.anymail_base_url:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "账号保存的 AnyMail 子 Key 已不可用，"
+                            "且设置中没有可用于修复的主凭据"
+                        ),
+                    ) from saved_exc
+
+                try:
+                    main_client = AnyMailClient(
+                        base_url=cfg.anymail_base_url,
+                        api_key=cfg.anymail_api_key,
+                    )
+                    await asyncio.to_thread(main_client.check_email_access, to=email)
+                except httpx.HTTPError as exc:
+                    # 网络瞬断时仍可进入浏览器轮询；create_child_key 也会安全降级。
+                    log(f"AnyMail 主 Key 探测暂时失败（{exc}），仍尝试自动修复。")
+                except (AnyMailAccessError, RuntimeError, ValueError) as main_exc:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"账号子 Key 已不可用，当前 AnyMail 主凭据也无法读取邮箱：{main_exc}",
+                    ) from main_exc
+
+                child = await asyncio.to_thread(
+                    main_client.create_child_key,
+                    email=email,
+                    expires_at=None,
+                    name_prefix="claude-register-relogin",
+                )
+                if child is not None:
+                    mail_api_key = child.plaintext
+                    mail_base_url = main_client.base_url
+                    repaired_fields = {
+                        "mail_key": child.plaintext,
+                        "mail_base_url": main_client.base_url,
+                    }
+                    log(f"已为 {email} 重新派生永久 AnyMail 子 Key。")
+                else:
+                    # 主 Key 没有 keys:create 时也能读信；清掉失效子 Key，今后直接
+                    # 回退设置里的主凭据，不再让每次重新登录都先撞同一个 401。
+                    mail_api_key = cfg.anymail_api_key
+                    mail_base_url = cfg.anymail_base_url
+                    repaired_fields = {"mail_key": "", "mail_base_url": ""}
+                    log(f"未能为 {email} 派生新子 Key，已改用 AnyMail 主 Key。")
+                db.update_account_fields(state.conn, email, repaired_fields)
 
         try:
             session_key = await asyncio.to_thread(
