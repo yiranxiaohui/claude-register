@@ -20,7 +20,7 @@ from server import auth, db
 from server.config_store import save_config, to_redacted_dict
 from server.deps import AppState, default_now
 from server.runner import RunnerBusy
-from server.takeover import TakeoverBusy
+from server.takeover import TakeoverBusy, TakeoverError
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
@@ -295,6 +295,63 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     def takeover_stop(_=Depends(require_auth)):
         state.takeover.stop()
         return {"ok": True}
+
+    @app.post("/api/takeover/relogin")
+    async def takeover_relogin(_=Depends(require_auth)):
+        info = state.takeover.status()
+        if not info.get("running") or not info.get("email"):
+            raise HTTPException(status_code=409, detail="当前没有活动的接管会话")
+
+        email = str(info["email"])
+        row = db.get_account(state.conn, email)
+        if row is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+
+        cfg = state.config()
+        if row.get("mail_key") and row.get("mail_base_url"):
+            mail_api_key = str(row["mail_key"])
+            mail_base_url = str(row["mail_base_url"])
+        else:
+            mail_api_key = cfg.anymail_api_key
+            mail_base_url = cfg.anymail_base_url
+        if not mail_api_key or not mail_base_url:
+            raise HTTPException(
+                status_code=400,
+                detail="该账号没有可用的收件凭据，且未配置 AnyMail 主凭据",
+            )
+
+        try:
+            session_key = await asyncio.to_thread(
+                state.takeover.relogin,
+                email=email,
+                mail_base_url=mail_base_url,
+                mail_api_key=mail_api_key,
+                login_timeout=cfg.register_login_timeout,
+            )
+        except TakeoverError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        check_status, check_detail = await asyncio.to_thread(
+            check_session,
+            session_key,
+            row.get("proxy") or "",
+        )
+        checked_at = state.now_fn()
+        if check_status == "dead":
+            db.update_account_check(state.conn, email, check_status, checked_at)
+            raise HTTPException(
+                status_code=422,
+                detail=f"重新登录取得的 sessionKey 仍不可用：{check_detail}",
+            )
+
+        db.update_account_fields(state.conn, email, {"session_key": session_key})
+        db.update_account_check(state.conn, email, check_status, checked_at)
+        return {
+            "ok": True,
+            "email": email,
+            "check_status": check_status,
+            "check_detail": check_detail,
+        }
 
     @app.get("/api/takeover")
     def takeover_status(_=Depends(require_auth)):

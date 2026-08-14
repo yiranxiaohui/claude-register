@@ -123,6 +123,22 @@ class TakeoverManager:
             self._timer.start()
             return {"email": email, "started_at": self._started_at}
 
+    def relogin(self, **kwargs) -> str:
+        """在活动接管浏览器所属线程执行一次自动重新登录。"""
+        with self._lock:
+            if not self._active or self._browser is None or self._browser_executor is None:
+                raise TakeoverError("当前没有活动的接管会话")
+            relogin = getattr(self._browser, "relogin", None)
+            if not callable(relogin):
+                raise TakeoverError("当前接管浏览器不支持重新登录")
+            try:
+                return self._browser_executor.submit(relogin, **kwargs).result()
+            except TakeoverError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                console.log(f"接管浏览器重新登录失败：{exc}")
+                raise TakeoverError(str(exc)) from exc
+
     def _idle_stop(self):
         console.log("接管会话空闲超时，自动结束。")
         self.stop()

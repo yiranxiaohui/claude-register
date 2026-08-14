@@ -45,7 +45,9 @@ docker compose up -d
 - 同一时刻只允许一个接管会话；默认空闲 15 分钟自动结束（`config.yaml` 的
   `takeover.idle_timeout_min` 可调，`takeover.enabled: false` 可整体关闭）。
 - 接管会话用独立的虚拟屏（`:100`，KasmVNC Xvnc），与注册流程（Xvfb）并行、互不影响。
-- sessionKey 是会话级凭证，换环境或过期会失效，接管打不开时重新注册获取即可。
+- sessionKey 是会话级凭证，换环境或过期会失效。接管画面落回登录页时，可在账号页的
+  接管提示条点击「重新自动登录」：系统会在当前 VNC 浏览器里重新提交邮箱、收取并打开
+  新的登录链接，成功后自动回写 sessionKey；如果账号确实被封则会明确报错且不会循环重试。
 
 ## 启动（CLI）
 

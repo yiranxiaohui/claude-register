@@ -33,8 +33,15 @@ class FakeLauncher:
 class FakeBrowser:
     def __init__(self):
         self.closed = False
+        self.owner_thread = threading.get_ident()
+        self.relogin_thread = None
+        self.relogin_kwargs = None
     def close(self):
         self.closed = True
+    def relogin(self, **kwargs):
+        self.relogin_thread = threading.get_ident()
+        self.relogin_kwargs = kwargs
+        return "sk-new"
 
 
 def _mgr(**kw):
@@ -95,6 +102,42 @@ def test_stop_is_idempotent():
     m = _mgr()
     m.stop()
     assert m.status()["running"] is False
+
+
+def test_relogin_runs_on_browser_owner_thread():
+    browsers = []
+
+    def bf(**kwargs):
+        browser = FakeBrowser()
+        browsers.append(browser)
+        return browser
+
+    m = _mgr(browser_fn=bf)
+    m.start(email="a@x.com", session_key="sk", idle_timeout_s=999)
+    try:
+        session_key = m.relogin(
+            email="a@x.com",
+            mail_base_url="https://mail.test",
+            mail_api_key="ak_child",
+            login_timeout=120,
+        )
+    finally:
+        m.stop()
+
+    assert session_key == "sk-new"
+    assert browsers[0].relogin_thread == browsers[0].owner_thread
+    assert browsers[0].relogin_kwargs["email"] == "a@x.com"
+
+
+def test_relogin_requires_active_takeover():
+    m = _mgr()
+    with pytest.raises(TakeoverError, match="没有活动"):
+        m.relogin(
+            email="a@x.com",
+            mail_base_url="https://mail.test",
+            mail_api_key="ak_child",
+            login_timeout=120,
+        )
 
 
 def test_browser_lifecycle_stays_on_one_thread_across_request_workers():

@@ -94,5 +94,8 @@ export const api = {
   takeoverStop: () =>
     fetch("/api/takeover/stop", { method: "POST" }).then(j),
 
+  takeoverRelogin: () =>
+    fetch("/api/takeover/relogin", { method: "POST" }).then(j),
+
   takeoverStatus: () => fetch("/api/takeover").then(j),
 };
