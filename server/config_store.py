@@ -1,4 +1,4 @@
-"""config.yaml 读写 + 密码脱敏。替代 .env。"""
+"""config.yaml 读写。替代 .env。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -125,16 +125,11 @@ def save_config(path: Path, updates: dict) -> Config:
     return cfg
 
 
-def to_redacted_dict(cfg: Config) -> dict:
+def to_dict(cfg: Config) -> dict:
     d = {f: getattr(cfg, f) for f in _FIELD_MAP}
-    for secret in ("panel_password", "anymail_api_key"):
-        if d[secret]:
-            d[secret] = REDACTED
     d["xui_enabled"] = cfg.xui_enabled
     d["xui_expiry_days"] = cfg.xui_expiry_days
     d["xui_port_min"] = cfg.xui_port_min
     d["xui_port_max"] = cfg.xui_port_max
-    d["xui_nodes"] = [
-        {**n, "password": REDACTED if n.get("password") else ""} for n in cfg.xui_nodes
-    ]
+    d["xui_nodes"] = [dict(n) for n in cfg.xui_nodes]
     return d

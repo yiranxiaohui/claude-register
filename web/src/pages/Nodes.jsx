@@ -20,7 +20,7 @@ const NODE_FIELDS = [
   { key: "name", label: "名称", placeholder: "如 usa-4" },
   { key: "base_url", label: "面板地址", placeholder: "http://host:2053" },
   { key: "username", label: "用户名", placeholder: "admin" },
-  { key: "password", label: "密码", placeholder: "••••", type: "password" },
+  { key: "password", label: "密码", placeholder: "登录密码" },
   { key: "proxy_host", label: "代理出口主机", placeholder: "对外连接用的 host" },
 ];
 

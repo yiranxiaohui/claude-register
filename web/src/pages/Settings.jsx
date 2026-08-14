@@ -7,21 +7,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 
-const SECRET_PLACEHOLDER = "••••";
-const SECRET_FIELDS = ["panel_password", "anymail_api_key"];
-
 const GROUPS = [
   {
     title: "面板",
     fields: [
-      { key: "panel_password", label: "面板密码", type: "password", secret: true },
+      { key: "panel_password", label: "面板密码", type: "text" },
       { key: "panel_port", label: "面板端口", type: "number" },
     ],
   },
   {
     title: "AnyMail 邮箱",
     fields: [
-      { key: "anymail_api_key", label: "AnyMail API Key", type: "password", secret: true },
+      { key: "anymail_api_key", label: "AnyMail API Key", type: "text" },
       { key: "anymail_base_url", label: "AnyMail Base URL", type: "text" },
       { key: "anymail_domain", label: "AnyMail 域名", type: "text" },
       { key: "anymail_expires_hours", label: "邮箱有效期（小时，0=永久）", type: "number" },
@@ -68,14 +65,8 @@ export default function Settings() {
   async function save(e) {
     e.preventDefault();
     setSaving(true);
-    const payload = { ...form };
-    for (const key of SECRET_FIELDS) {
-      if (payload[key] === SECRET_PLACEHOLDER || payload[key] === undefined) {
-        delete payload[key];
-      }
-    }
     try {
-      const updated = await api.putConfig(payload);
+      const updated = await api.putConfig(form);
       const picked = {};
       for (const k of OWN_KEYS) picked[k] = updated[k];
       setForm(picked);
@@ -115,7 +106,7 @@ export default function Settings() {
                     <Input
                       id={f.key}
                       type={f.type}
-                      placeholder={f.secret ? SECRET_PLACEHOLDER : f.placeholder ?? ""}
+                      placeholder={f.placeholder ?? ""}
                       value={form[f.key] ?? ""}
                       onChange={(e) =>
                         setField(
