@@ -17,7 +17,7 @@ from claude_register.proxy_pool import ProxyPool, XuiNode
 from claude_register.session_check import check_session
 from claude_register.xui import XuiClient
 from server import auth, db
-from server.config_store import save_config, to_redacted_dict
+from server.config_store import save_config, to_dict
 from server.deps import AppState, default_now
 from server.runner import RunnerBusy
 from server.takeover import TakeoverBusy, TakeoverError
@@ -70,13 +70,13 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
 
     @app.get("/api/config")
     def get_config(_=Depends(require_auth_or_bootstrap)):
-        return to_redacted_dict(state.config())
+        return to_dict(state.config())
 
     @app.put("/api/config")
     async def put_config(request: Request, _=Depends(require_auth_or_bootstrap)):
         body = await request.json()
         cfg = save_config(state.config_path, body)
-        return to_redacted_dict(cfg)
+        return to_dict(cfg)
 
     @app.post("/api/xui/test")
     async def xui_test(request: Request, _=Depends(require_auth)):

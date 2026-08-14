@@ -1,4 +1,4 @@
-"""server.app 集成测试：登录、脱敏配置、鉴权、忙时 409。"""
+"""server.app 集成测试：登录、配置、鉴权、忙时 409。"""
 from __future__ import annotations
 
 import time
@@ -25,13 +25,14 @@ def test_login_wrong_password(tmp_path):
     assert r.status_code == 401
 
 
-def test_login_and_get_config_redacted(tmp_path):
+def test_login_and_get_config_exposes_secrets(tmp_path):
     save_config(tmp_path / "config.yaml", {"panel_password": "pw", "anymail_api_key": "ak_1"})
     c = _client(tmp_path)
     assert c.post("/api/login", json={"password": "pw"}).status_code == 200
     r = c.get("/api/config")
     assert r.status_code == 200
-    assert r.json()["anymail_api_key"] == "••••"
+    assert r.json()["panel_password"] == "pw"
+    assert r.json()["anymail_api_key"] == "ak_1"
 
 
 def test_runs_requires_auth(tmp_path):

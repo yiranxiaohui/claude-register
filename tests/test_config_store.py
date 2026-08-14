@@ -1,5 +1,5 @@
 from pathlib import Path
-from server.config_store import load_config, save_config, to_redacted_dict, REDACTED
+from server.config_store import load_config, save_config, to_dict, REDACTED
 
 
 def test_load_missing_returns_defaults(tmp_path):
@@ -29,13 +29,13 @@ def test_save_empty_password_keeps_existing(tmp_path):
     assert cfg.anymail_domain == "example.com"
 
 
-def test_redacted_hides_secrets(tmp_path):
+def test_config_dict_exposes_secrets(tmp_path):
     cfg = load_config(tmp_path / "nope.yaml")
     object.__setattr__(cfg, "panel_password", "secret")
     object.__setattr__(cfg, "anymail_api_key", "ak_1")
-    d = to_redacted_dict(cfg)
-    assert d["panel_password"] == REDACTED
-    assert d["anymail_api_key"] == REDACTED
+    d = to_dict(cfg)
+    assert d["panel_password"] == "secret"
+    assert d["anymail_api_key"] == "ak_1"
     assert d["panel_port"] == 8790
 
 
@@ -53,7 +53,7 @@ def test_register_proxy_default_empty(tmp_path):
 def test_register_proxy_not_redacted(tmp_path):
     path = tmp_path / "config.yaml"
     save_config(path, {"register_proxy": "http://user:pass@1.2.3.4:8080"})
-    d = to_redacted_dict(load_config(path))
+    d = to_dict(load_config(path))
     assert d["register_proxy"] == "http://user:pass@1.2.3.4:8080"
 
 
@@ -91,13 +91,13 @@ def test_xui_yaml_uses_port_range_list(tmp_path):
     assert "port_range" in raw  # 落盘为 [min, max] 而非两个散字段
 
 
-def test_xui_node_password_redacted(tmp_path):
+def test_xui_node_password_visible(tmp_path):
     p = tmp_path / "config.yaml"
     node = {"name": "usa-4", "base_url": "https://x", "username": "u",
             "password": "secret", "proxy_host": ""}
     save_config(p, {"xui_nodes": [node]})
-    d = to_redacted_dict(load_config(p))
-    assert d["xui_nodes"][0]["password"] == REDACTED
+    d = to_dict(load_config(p))
+    assert d["xui_nodes"][0]["password"] == "secret"
     assert d["xui_nodes"][0]["name"] == "usa-4"
 
 
