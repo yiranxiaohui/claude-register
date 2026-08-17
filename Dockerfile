@@ -48,6 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG XPRA_VERSION=5.1.6-r0-1
 ARG XPRA_HTML5_VERSION=5.6-r14-1
 ADD https://xpra.org/xpra.asc /usr/share/keyrings/xpra.asc
+RUN chmod 0644 /usr/share/keyrings/xpra.asc
 COPY deploy/xpra-lts.sources /etc/apt/sources.list.d/xpra-lts.sources
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

@@ -44,6 +44,7 @@ def test_runtime_installs_pinned_xpra_lts_and_html5_client():
     assert "XPRA_HTML5_VERSION=5.6-r14-1" in dockerfile
     assert "xpra-server=${XPRA_VERSION}" in dockerfile
     assert "xpra-html5=${XPRA_HTML5_VERSION}" in dockerfile
+    assert "chmod 0644 /usr/share/keyrings/xpra.asc" in dockerfile
     assert "KASMVNC_VERSION" not in dockerfile
     assert "URIs: https://xpra.org/lts" in source
 
