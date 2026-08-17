@@ -42,13 +42,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*
-# KasmVNC：接管会话的 X 服务器 + Web 客户端 + websocket 推流（替代 x11vnc+noVNC）。
-# deb 按基础镜像的 Debian 版本选（python:3.13-slim 现为 trixie）；升级基础镜像时同步换。
-ARG KASMVNC_VERSION=1.5.0
-ADD https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_trixie_${KASMVNC_VERSION}_amd64.deb /tmp/kasmvncserver.deb
+# Xpra LTS：虚拟 X 桌面 + WebSocket/HTML5 客户端。固定 HTML5 5.6，避免较新
+# 16.x 客户端在慢网络下的重连回归，并保留双向 Clipboard API 同步。
+# 官方仓库签名 Key 指纹：B499 3B57 3231 48E3 7977 E5D8 7325 4CAD 1797 8FAF。
+ARG XPRA_VERSION=5.1.6-r0-1
+ARG XPRA_HTML5_VERSION=5.6-r14-1
+ADD https://xpra.org/xpra.asc /usr/share/keyrings/xpra.asc
+COPY deploy/xpra-lts.sources /etc/apt/sources.list.d/xpra-lts.sources
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends /tmp/kasmvncserver.deb && \
-    rm -rf /var/lib/apt/lists/* /tmp/kasmvncserver.deb
+    apt-get install -y --no-install-recommends \
+      xpra-server=${XPRA_VERSION} \
+      xpra-x11=${XPRA_VERSION} \
+      xpra-codecs=${XPRA_VERSION} \
+      xpra-html5=${XPRA_HTML5_VERSION} && \
+    rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir uv
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
