@@ -52,7 +52,7 @@ def test_runtime_installs_pinned_xpra_lts_and_html5_client():
 def test_takeover_wrapper_keeps_session_alive():
     page = (ROOT / "web" / "public" / "takeover.html").read_text(encoding="utf-8")
 
-    assert 'src="/vnc/?reconnect=yes&amp;clipboard=yes&amp;keyboard=yes' in page
+    assert 'src="/vnc/?reconnect=yes&amp;clipboard=yes&amp;keyboard=no' in page
     assert 'allow="clipboard-read; clipboard-write"' in page
     assert "viewerHealthTimer = setInterval(recoverViewer, 5_000)" in page
     assert 'fetch("/api/takeover/heartbeat"' in page
