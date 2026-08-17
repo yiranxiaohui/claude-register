@@ -50,6 +50,7 @@ def _mgr(**kw):
         launcher=kw.pop("launcher", FakeLauncher()),
         browser_fn=kw.pop("browser_fn", lambda **k: FakeBrowser()),
         wait_display_fn=kw.pop("wait_display_fn", lambda display: None),
+        wait_web_fn=kw.pop("wait_web_fn", lambda host, port: None),
         **kw,
     )
 
@@ -65,12 +66,17 @@ def test_start_status_stop_sequence():
     assert info["email"] == "a@x.com"
     assert m.status() == {"running": True, "email": "a@x.com", "started_at": "2026-07-30T00:00:00Z"}
     argv0 = [p.argv[0] for p in launcher.spawned]
-    assert argv0 == ["Xvnc"]
-    xvnc_argv = launcher.spawned[0].argv
-    # 关键安全参数：只绑 localhost、鉴权交给面板反代、跳过 STUN 公网探测
-    assert "-interface" in xvnc_argv and "127.0.0.1" in xvnc_argv
-    assert "-DisableBasicAuth" in xvnc_argv
-    assert "-publicIP" in xvnc_argv
+    assert argv0 == ["xpra"]
+    xpra_argv = launcher.spawned[0].argv
+    # 关键稳定性/安全参数：localhost + 面板鉴权、无传统 RFB、自动保活、双向剪贴板。
+    assert "start-desktop" in xpra_argv
+    assert "--bind-tcp=127.0.0.1:14500,auth=none" in xpra_argv
+    xvfb_arg = next(arg for arg in xpra_argv if arg.startswith("--xvfb="))
+    assert "-nolisten tcp" in xvfb_arg and "-ac" in xvfb_arg
+    assert "--rfb-upgrade=0" in xpra_argv
+    assert "--clipboard=yes" in xpra_argv
+    assert "--clipboard-direction=both" in xpra_argv
+    assert "--pings=5" in xpra_argv
     assert len(browsers) == 1
 
     m.stop()
@@ -232,3 +238,34 @@ def test_wait_x_socket_succeeds_when_present(tmp_path):
     from server.takeover_browser import wait_x_socket
     (tmp_path / "X100").write_text("")  # 伪造 X socket 文件
     wait_x_socket(":100", timeout=0.5, poll=0.02, sock_dir=str(tmp_path))  # 不抛即通过
+
+
+def test_wait_tcp_port_retries_until_xpra_is_ready():
+    from server.takeover_browser import wait_tcp_port
+
+    attempts = []
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    def connect(address, timeout):
+        attempts.append((address, timeout))
+        if len(attempts) < 3:
+            raise ConnectionRefusedError
+        return FakeConnection()
+
+    wait_tcp_port("127.0.0.1", 14500, timeout=0.2, poll=0.01, connect_fn=connect)
+    assert len(attempts) == 3
+
+
+def test_start_rolls_back_when_xpra_web_port_never_opens():
+    launcher = FakeLauncher()
+
+    def fail_wait(host, port):
+        raise TimeoutError(f"{host}:{port}")
+
+    m = _mgr(launcher=launcher, wait_web_fn=fail_wait)
+    with pytest.raises(TakeoverError, match="14500"):
+        m.start(email="a@x.com", session_key="sk", idle_timeout_s=999)
+    assert all(p.terminated for p in launcher.spawned)

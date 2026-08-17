@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import time
 
 from camoufox.sync_api import Camoufox
@@ -44,7 +45,7 @@ def takeover_max_upstream() -> int:
 
 def wait_x_socket(display: str, timeout: float = 10.0, poll: float = 0.1,
                   sock_dir: str = "/tmp/.X11-unix") -> None:
-    """轮询等待 Xvfb 的 UNIX socket 出现（display ":100" → 文件 X100）。"""
+    """轮询等待虚拟 X 服务器的 UNIX socket 出现（display ":100" → 文件 X100）。"""
     num = display.lstrip(":").split(".")[0]
     path = os.path.join(sock_dir, f"X{num}")
     deadline = time.monotonic() + timeout
@@ -53,6 +54,22 @@ def wait_x_socket(display: str, timeout: float = 10.0, poll: float = 0.1,
             return
         time.sleep(poll)
     raise TimeoutError(f"等待 X 显示 {display} 就绪超时（{path} 未出现）")
+
+
+def wait_tcp_port(host: str, port: int, timeout: float = 10.0,
+                  poll: float = 0.1, connect_fn=None) -> None:
+    """等待 Xpra 的 HTML5/WebSocket 监听口就绪，避免返回一个尚不可用的接管页。"""
+    connect = connect_fn or socket.create_connection
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            conn = connect((host, port), timeout=min(poll, 1.0))
+        except OSError:
+            time.sleep(poll)
+            continue
+        conn.close()
+        return
+    raise TimeoutError(f"等待 Xpra Web 端口 {host}:{port} 就绪超时")
 
 
 class _BrowserHandle:

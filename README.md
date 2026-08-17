@@ -36,19 +36,24 @@ docker compose up -d
 
 面板里改的设置会写回 `config.yaml`，接口和日志里 AnyMail Key 等敏感字段做了脱敏。
 
-## KasmVNC 免密登录接管
+## Xpra HTML5 免密登录接管
 
 账号列表里凡抓到 `sessionKey` 的账号，都可点「接管」：后台会用这份 Cookie 开一个
-已登录 claude.ai 的浏览器，并通过 KasmVNC 让你在网页上实时接管操作。
+已登录 claude.ai 的浏览器，并通过 Xpra HTML5 让你在网页上实时接管操作。
 
-- 容器内 Nginx 直接反代 KasmVNC 的 HTTP/WebSocket，并用 FastAPI
-  `auth_request` 复用面板密码鉴权；**不额外对外开端口**（Xvnc 仅绑 localhost）。
+- Xpra 直接管理独立虚拟桌面并提供 HTML5/WebSocket，不再使用 VNC/RFB 协议；
+  客户端自带 ping 保活和自动重连，连续恢复失败时外层接管页也会自动重载画面。
+- 容器内 Nginx 直接反代 Xpra，并用 FastAPI `auth_request` 复用面板密码鉴权；
+  **不额外对外开端口**（Xpra 仅绑 localhost，RFB/VNC 明确关闭）。
+- 双向文本剪贴板默认开启。使用 HTTPS 的 Chrome/Edge 时可直接在本机和接管浏览器之间
+  复制粘贴；首次使用需允许浏览器访问剪贴板。HTTP 或限制 Clipboard API 的浏览器可用
+  Xpra 右上角菜单里的剪贴板作为兜底。
 - 同一时刻只允许一个接管会话；接管页会每 20 秒续期，页面关闭或断网后默认
   15 分钟自动结束（`config.yaml` 的
   `takeover.idle_timeout_min` 可调，`takeover.enabled: false` 可整体关闭）。
-- 接管会话用独立的虚拟屏（`:100`，KasmVNC Xvnc），与注册流程（Xvfb）并行、互不影响。
+- 接管会话用独立的虚拟屏（`:100`，Xpra desktop），与注册流程并行、互不影响。
 - sessionKey 是会话级凭证，换环境或过期会失效。接管画面落回登录页时，可在账号页的
-  接管提示条点击「重新自动登录」：系统会在当前 VNC 浏览器里重新提交邮箱、收取并打开
+  接管提示条点击「重新自动登录」：系统会在当前接管浏览器里重新提交邮箱、收取并打开
   新的登录链接，成功后自动回写 sessionKey；如果账号确实被封则会明确报错且不会循环重试。
 
 ## 启动（CLI）

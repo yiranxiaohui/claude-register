@@ -12,6 +12,13 @@
         background: rgba(17, 24, 39, .92); text-align: center;
       }
       #notice.visible { display: grid; }
+      #clipboard-tip {
+        position: fixed; right: 12px; bottom: 12px; z-index: 5; max-width: 360px;
+        padding: 8px 12px; border-radius: 6px; background: rgba(17, 24, 39, .88);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, .3); font-size: 13px; line-height: 1.5;
+        transition: opacity .2s;
+      }
+      #clipboard-tip.hidden { opacity: 0; pointer-events: none; }
       button {
         margin-top: 16px; padding: 8px 16px; border: 1px solid #6b7280; border-radius: 6px;
         background: #1f2937; color: inherit; cursor: pointer;
@@ -21,11 +28,12 @@
   <body>
     <iframe
       id="viewer"
-      src="/vnc/?autoconnect=1&amp;resize=scale"
-      title="KasmVNC 接管画面"
+      src="/vnc/?reconnect=yes&amp;clipboard=yes&amp;keyboard=yes&amp;sharing=yes&amp;steal=yes&amp;sound=no&amp;printing=no&amp;file_transfer=no&amp;floating_menu=yes&amp;toolbar_position=top-right&amp;autohide=yes"
+      title="Xpra HTML5 接管画面"
       allow="clipboard-read; clipboard-write"
       allowfullscreen
     ></iframe>
+    <div id="clipboard-tip"></div>
     <div id="notice">
       <div>
         <div id="message">接管会话已断开</div>
@@ -35,7 +43,18 @@
     <script>
       const notice = document.getElementById("notice");
       const message = document.getElementById("message");
+      const viewer = document.getElementById("viewer");
+      const clipboardTip = document.getElementById("clipboard-tip");
       let heartbeatTimer;
+      let viewerHealthTimer;
+      let disconnectedAt = 0;
+
+      if (!window.isSecureContext || !navigator.clipboard) {
+        clipboardTip.textContent = "当前不是 HTTPS 安全页面，浏览器会限制自动剪贴板；仍可用 Xpra 右上角菜单手动复制粘贴。";
+      } else {
+        clipboardTip.textContent = "已启用双向剪贴板；首次复制粘贴时请允许浏览器访问剪贴板。";
+        setTimeout(() => clipboardTip.classList.add("hidden"), 8_000);
+      }
 
       async function heartbeat() {
         try {
@@ -59,8 +78,33 @@
       document.getElementById("reload").addEventListener("click", () => {
         window.location.reload();
       });
-      window.addEventListener("online", heartbeat);
+
+      function recoverViewer() {
+        if (!navigator.onLine) return;
+        try {
+          const xpra = viewer.contentWindow && viewer.contentWindow.client;
+          // Xpra 会先自行快速重连；持续失败 15 秒后重载 iframe，重新获得一轮
+          // 完整重连机会。这样短暂丢包不会闪屏，长断线恢复后也无需人工刷新。
+          if (!xpra || xpra.connected || xpra.reconnect_in_progress) {
+            disconnectedAt = 0;
+            return;
+          }
+          if (!disconnectedAt) disconnectedAt = Date.now();
+          if (Date.now() - disconnectedAt >= 15_000) {
+            viewer.src = viewer.src;
+            disconnectedAt = 0;
+          }
+        } catch {
+          // iframe 尚未完成同源页面加载时下一轮再检查。
+        }
+      }
+
+      window.addEventListener("online", () => {
+        heartbeat();
+        recoverViewer();
+      });
       heartbeatTimer = setInterval(heartbeat, 20_000);
+      viewerHealthTimer = setInterval(recoverViewer, 5_000);
       heartbeat();
     </script>
   </body>

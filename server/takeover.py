@@ -1,10 +1,10 @@
-"""接管会话：注入 sessionKey 的已登录 claude.ai 浏览器 + KasmVNC，供网页接管。
+"""接管会话：注入 sessionKey 的已登录 claude.ai 浏览器 + Xpra，供网页接管。
 
 与注册流程（server/runner.py）平级、各用各的屏：注册走 Camoufox 的 "virtual"
-自选屏，接管用 KasmVNC 的 Xvnc 直接当 :100 的 X 服务器（自带 Web 客户端与
-websocket 推流，比 Xvfb+x11vnc+noVNC 三件套流畅得多，进程也从两个减到一个）。
-单例：同一时刻只允许一个接管会话。Xvnc 只绑 localhost，不对外暴露端口，
-由同容器 Nginx 直接反代，并通过 FastAPI auth_request 复用面板鉴权。
+自选屏，接管用 Xpra start-desktop 管理独立的 :100 虚拟桌面，并直接提供 HTML5
+客户端和 WebSocket 传输。Xpra 客户端支持自动重连和双向系统剪贴板同步。
+单例：同一时刻只允许一个接管会话。Xpra 只绑 localhost，不对外暴露端口，
+由同容器 Nginx 反代，并通过 FastAPI auth_request 复用面板鉴权。
 """
 from __future__ import annotations
 
@@ -41,13 +41,10 @@ def _terminate(proc) -> None:
             pass
 
 
-# KasmVNC 的 Web 资源目录（deb 安装的固定路径），Xvnc 的 -httpd 指到这里。
-KASM_WWW = "/usr/share/kasmvnc/www"
-
-
 class TakeoverManager:
     def __init__(self, *, now_fn, launcher=None, browser_fn=None,
-                 wait_display_fn=None, display=":100", web_port=6901):
+                 wait_display_fn=None, wait_web_fn=None,
+                 display=":100", web_port=14500):
         self.now_fn = now_fn
         self.launcher = launcher or ProcessLauncher()
         self._browser_fn = browser_fn
@@ -56,13 +53,18 @@ class TakeoverManager:
         else:
             from server.takeover_browser import wait_x_socket
             self._wait_display = lambda display: wait_x_socket(display)
+        if wait_web_fn is not None:
+            self._wait_web = wait_web_fn
+        else:
+            from server.takeover_browser import wait_tcp_port
+            self._wait_web = wait_tcp_port
         self.display = display
         self.web_port = web_port
         self._lock = threading.RLock()
         self._active = False
         self._email = None
         self._started_at = None
-        self._xvnc = None
+        self._xpra = None
         self._browser = None
         self._browser_executor = None
         self._timer = None
@@ -85,21 +87,33 @@ class TakeoverManager:
                 from server.takeover_browser import open_takeover_browser
                 self._browser_fn = open_takeover_browser
             try:
-                # KasmVNC 的 Xvnc 本身就是 X 服务器，浏览器直接挂上去，无需
-                # Xvfb+x11vnc 两级。要点：
-                # - 只监听 localhost 的 websocket 口（实测无遗留 RFB/X TCP 口）；
-                # - -SecurityTypes None + -DisableBasicAuth：鉴权由面板反代做；
-                # - -publicIP 127.0.0.1：跳过启动时的 STUN 公网探测（外网被墙时
-                #   会卡住 websocket 监听迟迟不起来）；WebRTC/UDP 用不到。
-                self._xvnc = self.launcher.spawn([
-                    "Xvnc", self.display, "-geometry", "1280x900", "-depth", "24",
-                    "-interface", "127.0.0.1",
-                    "-websocketPort", str(self.web_port),
-                    "-SecurityTypes", "None", "-DisableBasicAuth",
-                    "-sslOnly", "0", "-publicIP", "127.0.0.1",
-                    "-httpd", KASM_WWW,
+                # Xpra 自己拉起虚拟 X 桌面并提供 HTML5/WebSocket：
+                # - TCP 只绑 localhost，外层 Nginx + 面板 Cookie 负责鉴权；
+                # - 关闭 RFB 升级，避免意外提供传统 VNC 协议；
+                # - 双向剪贴板和 ping 保活显式开启，断线重连由 HTML5 客户端负责；
+                # - 音频、打印、传文件等接管不需要的子系统全部关闭，减少进程和故障面。
+                self._xpra = self.launcher.spawn([
+                    "xpra", "start-desktop", self.display,
+                    "--daemon=no", "--start-via-proxy=no", "--systemd-run=no",
+                    # 浏览器由本进程（而不是 Xpra --start-child）创建，因此虚拟屏
+                    # 关闭 Xauthority 校验；-nolisten tcp 保证该 X server 仍只在容器
+                    # 本地 UNIX socket 可达。
+                    "--xvfb=Xvfb +extension GLX +extension Composite "
+                    "-screen 0 8192x4096x24+32 -nolisten tcp -noreset -ac -dpi 96x96",
+                    "--bind=none",
+                    f"--bind-tcp=127.0.0.1:{self.web_port},auth=none",
+                    "--html=on", "--ssl=off", "--rfb-upgrade=0",
+                    "--http-scripts=off", "--mdns=no",
+                    "--resize-display=1280x900", "--sharing=yes",
+                    "--clipboard=yes", "--clipboard-direction=both", "--pings=5",
+                    "--speaker=off", "--microphone=off", "--pulseaudio=no",
+                    "--printing=no", "--file-transfer=no", "--webcam=no",
+                    "--notifications=no", "--tray=no", "--system-tray=no",
+                    "--dbus-launch=no", "--dbus-control=no", "--dbus-proxy=no",
+                    "--start-new-commands=no", "--exit-with-children=no",
                 ])
                 self._wait_display(self.display)
+                self._wait_web("127.0.0.1", self.web_port)
                 # Playwright 的 Sync API 通过线程绑定的 greenlet 驱动事件循环。
                 # FastAPI 的启动、停止请求可能落到不同工作线程，因此浏览器的
                 # 创建和关闭都必须显式派发到同一条专用线程。
@@ -194,6 +208,6 @@ class TakeoverManager:
                 console.log(f"关闭接管浏览器失败：{exc}")
         if browser_executor is not None:
             browser_executor.shutdown(wait=True, cancel_futures=True)
-        if self._xvnc is not None:
-            _terminate(self._xvnc)
-            self._xvnc = None
+        if self._xpra is not None:
+            _terminate(self._xpra)
+            self._xpra = None

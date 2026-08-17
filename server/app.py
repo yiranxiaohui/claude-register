@@ -423,7 +423,7 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
 
     @app.get("/api/vnc-auth", status_code=204)
     def vnc_auth(_=Depends(require_auth)):
-        """Nginx auth_request 子请求：复用面板 Cookie 保护 KasmVNC。"""
+        """Nginx auth_request 子请求：复用面板 Cookie 保护 Xpra HTML5。"""
         return Response(status_code=204)
 
     @app.post("/api/takeover/heartbeat")
@@ -451,7 +451,7 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
 
     @app.on_event("shutdown")
     def _cleanup_takeover():
-        # server 关闭/重启时兜底清理接管会话，避免 Xvnc/浏览器变孤儿进程。
+        # server 关闭/重启时兜底清理接管会话，避免 Xpra/浏览器变孤儿进程。
         # stop() 幂等，没在跑也安全。
         state.takeover.stop()
 
