@@ -73,6 +73,15 @@ def test_start_status_stop_sequence():
     assert "--bind-tcp=127.0.0.1:14500,auth=none" in xpra_argv
     xvfb_arg = next(arg for arg in xpra_argv if arg.startswith("--xvfb="))
     assert "-nolisten tcp" in xvfb_arg and "-ac" in xvfb_arg
+    # 客户端画布尺寸会随浏览器窗口变化。Xvfb 必须保留上面的 8192x4096
+    # 可调整上限，让 Xpra 在连接时匹配客户端；固定 1280x900 会导致鼠标坐标
+    # 与画面缩放错位，原生 select 弹层一移入就失焦关闭。
+    assert "-screen 0 8192x4096x24+32" in xvfb_arg
+    assert "--resize-display=yes" in xpra_argv
+    assert not any(
+        arg.startswith("--resize-display=") and arg != "--resize-display=yes"
+        for arg in xpra_argv
+    )
     assert "--rfb-upgrade=0" in xpra_argv
     assert "--clipboard=yes" in xpra_argv
     assert "--clipboard-direction=both" in xpra_argv
