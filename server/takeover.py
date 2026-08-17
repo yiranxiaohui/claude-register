@@ -104,7 +104,10 @@ class TakeoverManager:
                     f"--bind-tcp=127.0.0.1:{self.web_port},auth=none",
                     "--html=on", "--ssl=off", "--rfb-upgrade=0",
                     "--http-scripts=off", "--mdns=no",
-                    "--resize-display=1280x900", "--sharing=yes",
+                    # 让 Xpra 在客户端连接/窗口变化时把桌面匹配到客户端尺寸。
+                    # 指定 1280x900 会同时把 Xvfb 的可调整上限锁到该尺寸；
+                    # 更宽的 HTML5 画布随后 resize 失败，画面缩放与鼠标坐标失配。
+                    "--resize-display=yes", "--sharing=yes",
                     "--clipboard=yes", "--clipboard-direction=both", "--pings=5",
                     "--speaker=off", "--microphone=off", "--pulseaudio=no",
                     "--printing=no", "--file-transfer=no", "--webcam=no",
