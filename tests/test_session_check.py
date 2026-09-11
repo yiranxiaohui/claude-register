@@ -74,6 +74,13 @@ def test_empty_key_no_request():
     assert calls["n"] == 0  # 没有发请求
 
 
+def test_malformed_200_is_error():
+    make, _ = _factory(lambda req: httpx.Response(200, json={"ok": True}))
+    status, detail = check_session("sk-x", client_factory=make)
+    assert status == "error"
+    assert "组织列表" in detail
+
+
 def test_proxy_passed_to_factory():
     make, captured = _factory(lambda req: httpx.Response(200, json=[]))
     check_session("sk-x", proxy="socks5://u:p@1.2.3.4:1080", client_factory=make)

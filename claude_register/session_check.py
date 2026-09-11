@@ -40,6 +40,20 @@ def _looks_like_shield(resp: httpx.Response) -> bool:
         return True
 
 
+def _looks_like_org_payload(resp: httpx.Response) -> bool:
+    """确认 200 真的是组织 API JSON，而不是代理返回的伪成功页面。"""
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return False
+    if isinstance(payload, list):
+        return all(isinstance(item, dict) for item in payload)
+    if isinstance(payload, dict):
+        items = payload.get("organizations")
+        return isinstance(items, list) and all(isinstance(item, dict) for item in items)
+    return False
+
+
 def check_session(
     session_key: str,
     proxy: str | None = None,
@@ -73,7 +87,9 @@ def check_session(
         return ("error", f"请求失败：{type(exc).__name__}")
 
     if resp.status_code == 200 and not _looks_like_shield(resp):
-        return ("alive", "有效")
+        if _looks_like_org_payload(resp):
+            return ("alive", "有效")
+        return ("error", "响应不是有效的组织列表")
     if resp.status_code in (401, 403):
         if _looks_like_shield(resp):
             return ("error", "疑似 Cloudflare 盾拦截")
