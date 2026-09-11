@@ -9,6 +9,12 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 export default function Register({ runStream }) {
   const { activeRunId, activeStatus, logLines, attach, streamEpoch } = runStream;
+  const [proxies, setProxies] = useState([]);
+  const [proxyId, setProxyId] = useState("");
+  useEffect(() => {
+    api.getConfig().then((cfg) => setProxies(cfg.saved_proxies || []))
+      .catch(() => toast.error("代理列表加载失败，请刷新页面"));
+  }, []);
   const [domain, setDomain] = useState("");
   const [email, setEmail] = useState("");
   const [starting, setStarting] = useState(false);
@@ -28,10 +34,10 @@ export default function Register({ runStream }) {
   async function startRun() {
     setStarting(true);
     try {
-      const res = await api.startRun(email || undefined, domain || undefined);
+      const res = await api.startRun(email || undefined, domain || undefined, proxyId || undefined);
       attach(res.run_id);
     } catch (err) {
-      toast.error(err.status === 409 ? "已有任务在运行" : "启动失败，请重试");
+      toast.error(err.status === 409 ? "已有任务在运行" : err.body?.detail || "启动失败，请重试");
     } finally {
       setStarting(false);
     }
@@ -63,6 +69,15 @@ export default function Register({ runStream }) {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
+            <div className="space-y-1.5">
+              <label htmlFor="registration-proxy" className="text-sm font-medium">注册代理</label>
+              <select id="registration-proxy" value={proxyId} onChange={(e) => setProxyId(e.target.value)}
+                className="h-10 w-full rounded-md border bg-background px-3 text-sm">
+                <option value="">使用默认配置（3x-ui / 固定代理 / 直连）</option>
+                {proxies.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <p className="text-xs text-muted-foreground">在<a className="underline" href="#/proxies">代理池</a>保存代理后，可在此选择用于本次注册。</p>
+            </div>
             <Button
               onClick={startRun}
               disabled={starting || activeStatus === "running"}

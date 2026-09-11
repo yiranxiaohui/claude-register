@@ -29,11 +29,11 @@ export const api = {
       body: JSON.stringify(body),
     }).then(j),
 
-  startRun: (email, domain) =>
+  startRun: (email, domain, proxyId) =>
     fetch("/api/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, domain }),
+      body: JSON.stringify({ email, domain, proxy_id: proxyId }),
     }).then(j),
 
   listRuns: () => fetch("/api/runs").then(j),

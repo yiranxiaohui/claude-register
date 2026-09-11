@@ -1,6 +1,8 @@
 """FastAPI：路由 + SSE + 静态托管。薄，活派给 config_store/db/runner/auth。"""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import asyncio
 import hmac
 import httpx
@@ -77,7 +79,10 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     @app.put("/api/config")
     async def put_config(request: Request, _=Depends(require_auth_or_bootstrap)):
         body = await request.json()
-        cfg = save_config(state.config_path, body)
+        try:
+            cfg = save_config(state.config_path, body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         return to_dict(cfg)
 
     @app.post("/api/xui/test")
@@ -115,9 +120,21 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     @app.post("/api/runs")
     async def start_run(request: Request, _=Depends(require_auth)):
         body = await request.json() if await request.body() else {}
+        cfg = state.config()
+        proxy_id = body.get("proxy_id")
+        if proxy_id is not None:
+            selected = next((p for p in cfg.saved_proxies if p["id"] == proxy_id), None)
+            if selected is None:
+                raise HTTPException(status_code=400, detail="所选代理不存在，请刷新代理列表")
+            from claude_register.browser import validate_proxy
+            try:
+                validate_proxy(selected["url"])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="所选代理地址无效，请编辑后重试") from None
+            cfg = replace(cfg, register_proxy=selected["url"], xui_enabled=False)
         try:
             rid = state.runner.start(
-                state.config(),
+                cfg,
                 email=body.get("email"),
                 domain=body.get("domain"),
                 flow_fn=flow.run,

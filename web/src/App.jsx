@@ -21,11 +21,13 @@ import Login from "./pages/Login.jsx";
 import Register from "./pages/Register.jsx";
 import Accounts from "./pages/Accounts.jsx";
 import Nodes from "./pages/Nodes.jsx";
+import Proxies from "./pages/Proxies.jsx";
 import Settings from "./pages/Settings.jsx";
 
 const NAV = [
   { key: "register", label: "注册", Icon: Play },
   { key: "accounts", label: "账号", Icon: Users },
+  { key: "proxies", label: "代理池", Icon: Server },
   { key: "nodes", label: "节点", Icon: Server },
   { key: "settings", label: "设置", Icon: SettingsIcon },
 ];
@@ -123,6 +125,7 @@ export default function App() {
               navigate={navigate}
             />
           )}
+          {view === "proxies" && <Proxies />}
           {view === "nodes" && <Nodes />}
           {view === "settings" && <Settings />}
         </div>

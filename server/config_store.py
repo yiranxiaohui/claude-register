@@ -21,6 +21,7 @@ class Config:
     register_auto_login: bool = True
     register_code_regex: str = ""
     register_proxy: str = ""
+    saved_proxies: tuple = ()
     xui_enabled: bool = False
     xui_expiry_days: int = 30
     xui_port_min: int = 40000
@@ -60,6 +61,7 @@ def load_config(path: Path) -> Config:
         register_auto_login=bool(reg.get("auto_login", True)),
         register_code_regex=str(reg.get("code_regex", "") or ""),
         register_proxy=str(reg.get("proxy", "") or ""),
+        saved_proxies=tuple(reg.get("proxies") or []),
         xui_enabled=bool(xui.get("enabled", False)),
         xui_expiry_days=int(xui.get("expiry_days", 30)),
         xui_port_min=int(pr[0]),
@@ -98,6 +100,9 @@ def save_config(path: Path, updates: dict) -> Config:
     for k in ("xui_enabled", "xui_expiry_days", "xui_port_min", "xui_port_max"):
         if k in clean:
             xui_scalar[k] = clean.pop(k)
+    incoming_proxies = clean.pop("saved_proxies", None)
+    if "saved_proxies" in updates:
+        cfg = replace(cfg, saved_proxies=validate_saved_proxies(incoming_proxies))
     incoming_nodes = clean.pop("xui_nodes", None)
     cfg = replace(cfg, **{k: v for k, v in clean.items() if k in _FIELD_MAP})
     cfg = replace(cfg, **xui_scalar)
@@ -113,6 +118,7 @@ def save_config(path: Path, updates: dict) -> Config:
     out: dict = {"panel": {}, "anymail": {}, "register": {}, "xui": {}, "takeover": {}}
     for field, (section, key) in _FIELD_MAP.items():
         out[section][key] = getattr(cfg, field)
+    out["register"]["proxies"] = [dict(p) for p in cfg.saved_proxies]
     out["xui"] = {
         "enabled": cfg.xui_enabled,
         "expiry_days": cfg.xui_expiry_days,
@@ -127,9 +133,35 @@ def save_config(path: Path, updates: dict) -> Config:
 
 def to_dict(cfg: Config) -> dict:
     d = {f: getattr(cfg, f) for f in _FIELD_MAP}
+    d["saved_proxies"] = [dict(p) for p in cfg.saved_proxies]
     d["xui_enabled"] = cfg.xui_enabled
     d["xui_expiry_days"] = cfg.xui_expiry_days
     d["xui_port_min"] = cfg.xui_port_min
     d["xui_port_max"] = cfg.xui_port_max
     d["xui_nodes"] = [dict(n) for n in cfg.xui_nodes]
     return d
+
+
+def validate_saved_proxies(raw) -> tuple:
+    from claude_register.browser import validate_proxy
+
+    if not isinstance(raw, list):
+        raise ValueError("代理池必须为列表")
+    entries = []
+    ids = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ValueError("代理条目格式错误")
+        if any(not isinstance(entry.get(k), str) or not entry[k].strip()
+               for k in ("id", "name", "url")):
+            raise ValueError("代理 ID、名称和地址不能为空")
+        proxy = {k: entry[k].strip() for k in ("id", "name", "url")}
+        if proxy["id"] in ids:
+            raise ValueError("代理 ID 不能重复")
+        try:
+            validate_proxy(proxy["url"])
+        except ValueError:
+            raise ValueError("代理地址无效，请使用带端口的 HTTP(S) 或 SOCKS 代理地址") from None
+        ids.add(proxy["id"])
+        entries.append(proxy)
+    return tuple(entries)
