@@ -5,7 +5,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 
-const blank = () => ({ id: crypto.randomUUID(), name: "", url: "" });
+const newId = () => (globalThis.crypto?.randomUUID?.() || `proxy-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+const blank = () => ({ id: newId(), name: "", url: "" });
 export default function Proxies() {
   const [items, setItems] = useState([]); const [form, setForm] = useState(blank); const [loading, setLoading] = useState(true);
   useEffect(() => { api.getConfig().then(c => setItems(c.saved_proxies || [])).catch(() => toast.error("加载失败")).finally(() => setLoading(false)); }, []);
