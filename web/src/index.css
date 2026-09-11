@@ -1,17 +1,18 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
 
 @custom-variant dark (&:is(.dark *));
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
+  --background: oklch(0.975 0.012 255);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.141 0.005 285.823);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.21 0.006 285.885);
+  --primary: oklch(0.48 0.19 263);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.967 0.001 286.375);
   --secondary-foreground: oklch(0.21 0.006 285.885);
@@ -23,11 +24,11 @@
   --border: oklch(0.92 0.004 286.32);
   --input: oklch(0.92 0.004 286.32);
   --ring: oklch(0.705 0.015 286.067);
-  --sidebar: hsl(0 0% 98%);
-  --sidebar-foreground: hsl(240 5.3% 26.1%);
-  --sidebar-primary: hsl(240 5.9% 10%);
+  --sidebar: hsl(224 34% 12%);
+  --sidebar-foreground: hsl(220 20% 92%);
+  --sidebar-primary: hsl(204 94% 58%);
   --sidebar-primary-foreground: hsl(0 0% 98%);
-  --sidebar-accent: hsl(240 4.8% 95.9%);
+  --sidebar-accent: hsl(223 28% 20%);
   --sidebar-accent-foreground: hsl(240 5.9% 10%);
   --sidebar-border: hsl(220 13% 91%);
   --sidebar-ring: hsl(217.2 91.2% 59.8%);
@@ -101,8 +102,20 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: "DM Sans", system-ui, sans-serif;
+    background-image: radial-gradient(circle at 10% 0%, color-mix(in oklab, var(--primary) 7%, transparent), transparent 32rem);
   }
 }
+
+.app-shell { background: radial-gradient(circle at 50% -10%, oklch(1 0 0 / .8), transparent 34rem); }
+.brand { font-family: "Space Grotesk", sans-serif; letter-spacing: -.02em; color: #f4f7ff; }
+.brand-mark { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 9px; color: white; background: linear-gradient(135deg, #42b8ff, #6757f5); box-shadow: 0 5px 18px #3a7cff55; }
+.brand-subtitle { display: block; margin: 7px 0 0 36px; color: #95a5c2; font: 500 10px "DM Sans", sans-serif; letter-spacing: .08em; }
+.app-content > * { animation: rise-in .28s ease-out both; }
+.loading-mark { display: flex; gap: .5rem; align-items: center; color: var(--muted-foreground); font-size: .9rem; }
+.loading-mark svg { color: var(--primary); animation: pulse 1.5s infinite; }
+.card { box-shadow: 0 12px 35px oklch(.2 .03 260 / .06); }
+@keyframes rise-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
 
 /* ===== 项目自定义（shadcn 覆盖不到的） ===== */
 .log-panel {

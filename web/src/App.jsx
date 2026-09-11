@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Play, Users, Server, Settings as SettingsIcon } from "lucide-react";
+import { Play, Users, Server, Settings as SettingsIcon, Sparkles } from "lucide-react";
 import { api } from "./api.js";
 import { useRunStream } from "./hooks/useRunStream.js";
 import { Toaster } from "@/components/ui/sonner";
@@ -25,11 +25,11 @@ import Proxies from "./pages/Proxies.jsx";
 import Settings from "./pages/Settings.jsx";
 
 const NAV = [
-  { key: "register", label: "注册", Icon: Play },
-  { key: "accounts", label: "账号", Icon: Users },
-  { key: "proxies", label: "代理池", Icon: Server },
-  { key: "nodes", label: "节点", Icon: Server },
-  { key: "settings", label: "设置", Icon: SettingsIcon },
+  { key: "register", label: "注册任务", description: "创建与监控自动化任务", Icon: Play },
+  { key: "accounts", label: "账号管理", description: "查看账号状态与凭据", Icon: Users },
+  { key: "proxies", label: "代理池", description: "管理网络出口", Icon: Server },
+  { key: "nodes", label: "节点设置", description: "配置 3x-ui 节点", Icon: Server },
+  { key: "settings", label: "系统设置", description: "调整面板与注册参数", Icon: SettingsIcon },
 ];
 
 const VIEW_KEYS = NAV.map((n) => n.key);
@@ -63,8 +63,8 @@ export default function App() {
 
   if (authed === null) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="text-muted-foreground">加载中…</div>
+        <div className="app-shell flex min-h-screen items-center justify-center">
+        <div className="loading-mark"><Sparkles className="size-5" /> 加载面板…</div>
       </div>
     );
   }
@@ -83,11 +83,9 @@ export default function App() {
     <SidebarProvider>
       <Sidebar collapsible="icon">
         <SidebarHeader>
-          <div className="px-2 py-1.5 font-bold tracking-wide group-data-[collapsible=icon]:hidden">
-            claude-register
-            <span className="block text-[11px] font-normal text-muted-foreground">
-              管理面板
-            </span>
+          <div className="brand px-2 py-2 group-data-[collapsible=icon]:hidden">
+            <div className="flex items-center gap-2"><span className="brand-mark"><Sparkles className="size-4" /></span><span>claude-register</span></div>
+            <span className="brand-subtitle">自动化注册工作台</span>
           </div>
         </SidebarHeader>
         <SidebarContent>
@@ -114,9 +112,9 @@ export default function App() {
         <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="mr-1 h-4" />
-          <span className="text-sm font-medium">{current?.label}</span>
+          <div><span className="text-sm font-semibold">{current?.label}</span><span className="ml-3 hidden text-xs text-muted-foreground sm:inline">{current?.description}</span></div>
         </header>
-        <div className="min-w-0 max-w-5xl flex-1 px-8 py-6 max-md:px-4">
+        <div className="app-content min-w-0 max-w-6xl flex-1 px-8 py-8 max-md:px-4">
           {view === "register" && <Register runStream={runStream} />}
           {view === "accounts" && (
             <Accounts
