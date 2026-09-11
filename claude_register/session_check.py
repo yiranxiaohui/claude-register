@@ -92,6 +92,6 @@ def check_session(
         return ("error", "响应不是有效的组织列表")
     if resp.status_code in (401, 403):
         if _looks_like_shield(resp):
-            return ("error", "疑似 Cloudflare 盾拦截")
+            return ("blocked", "Cloudflare 盾拦截，无法判定")
         return ("dead", f"已失效（HTTP {resp.status_code}）")
     return ("error", f"未知响应（HTTP {resp.status_code}）")

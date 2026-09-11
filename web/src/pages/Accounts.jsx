@@ -29,10 +29,11 @@ const EDIT_FIELDS = [
   ["proxy", "代理", "socks5://user:pass@host:port", true],
 ];
 
-const LIVE_LABEL = { alive: "有效", dead: "失效", error: "检测失败" };
+const LIVE_LABEL = { alive: "有效", dead: "失效", blocked: "被拦截", error: "检测失败" };
 const LIVE_CLS = {
   alive: "bg-emerald-500/15 text-emerald-400",
   dead: "bg-red-500/15 text-red-400",
+  blocked: "bg-amber-500/15 text-amber-400",
   error: "bg-muted text-muted-foreground",
 };
 
