@@ -17,7 +17,11 @@ export default function Login({ onOk }) {
       await api.login(password);
       onOk();
     } catch (err) {
-      toast.error(err.status === 401 ? "密码错误" : "登录失败，请重试");
+      const detail = err.body?.detail;
+      toast.error(
+        err.status === 401 ? detail || "密码错误" : "登录失败，请重试",
+      );
+      setPassword("");
     } finally {
       setBusy(false);
     }

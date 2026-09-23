@@ -11,7 +11,7 @@ const GROUPS = [
   {
     title: "面板",
     fields: [
-      { key: "panel_password", label: "面板密码", type: "text" },
+      { key: "panel_password", label: "面板密码（留空不修改）", type: "password" },
       { key: "panel_port", label: "面板端口", type: "number" },
     ],
   },
@@ -42,7 +42,7 @@ const GROUPS = [
 
 const OWN_KEYS = GROUPS.flatMap((g) => g.fields.map((f) => f.key));
 
-export default function Settings() {
+export default function Settings({ onPasswordSet }) {
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -53,9 +53,13 @@ export default function Settings() {
       .then((cfg) => {
         const picked = {};
         for (const k of OWN_KEYS) picked[k] = cfg[k];
+        // 密码不回填：避免明文展示，也让「留空=不修改」语义对得上。
+        picked.panel_password = "";
         setForm(picked);
       })
-      .catch(() => setLoadError("加载配置失败"));
+      .catch((err) => {
+        if (err?.status !== 401) setLoadError("加载配置失败");
+      });
   }, []);
 
   function setField(key, value) {
@@ -65,14 +69,23 @@ export default function Settings() {
   async function save(e) {
     e.preventDefault();
     setSaving(true);
+    const changedPassword = !!(form.panel_password || "").trim();
     try {
       const updated = await api.putConfig(form);
       const picked = {};
       for (const k of OWN_KEYS) picked[k] = updated[k];
+      picked.panel_password = "";
       setForm(picked);
+      if (changedPassword) {
+        // 会话签名绑定密码，改密码 = 当前 cookie 立即失效。
+        // 不提示的话，面板会变成处处报错的「僵尸页」。
+        toast.success("密码已更新，请用新密码重新登录");
+        onPasswordSet?.();
+        return;
+      }
       toast.success("已保存");
-    } catch {
-      toast.error("保存失败，请重试");
+    } catch (err) {
+      if (err?.status !== 401) toast.error("保存失败，请重试");
     } finally {
       setSaving(false);
     }
