@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "pyyaml>=6.0",
     "sse-starlette>=2.1",
+    "curl-cffi>=0.13",
 ]
 
 [project.scripts]
