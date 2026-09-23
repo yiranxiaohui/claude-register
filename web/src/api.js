@@ -1,5 +1,15 @@
+// 会话失效（401）全局广播：App 监听后踢回登录页，
+// 避免密码改了/cookie 过期后面板还停在空壳界面上。
+export const SESSION_EXPIRED_EVENT = "cr:session-expired";
+
+// 登录请求自身的 401 是「密码错」，不是会话失效，不广播。
+const AUTH_FREE = new Set(["/api/login", "/api/logout"]);
+
 const j = async (r) => {
   if (!r.ok) {
+    if (r.status === 401 && !AUTH_FREE.has(new URL(r.url, location.origin).pathname)) {
+      window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
+    }
     const err = new Error(`http ${r.status}`);
     err.status = r.status;
     try {
@@ -21,6 +31,8 @@ export const api = {
     }).then(j),
 
   getConfig: () => fetch("/api/config").then(j),
+
+  logout: () => fetch("/api/logout", { method: "POST" }).then(j),
 
   putConfig: (body) =>
     fetch("/api/config", {
@@ -45,6 +57,7 @@ export const api = {
   exportAccountsText: () =>
     fetch("/api/accounts/export").then((r) => {
       if (!r.ok) {
+        if (r.status === 401) window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
         const err = new Error(`http ${r.status}`);
         err.status = r.status;
         throw err;

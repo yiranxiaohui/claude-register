@@ -9,7 +9,7 @@ const newId = () => (globalThis.crypto?.randomUUID?.() || `proxy-${Date.now()}-$
 const blank = () => ({ id: newId(), name: "", url: "" });
 export default function Proxies() {
   const [items, setItems] = useState([]); const [form, setForm] = useState(blank); const [loading, setLoading] = useState(true);
-  useEffect(() => { api.getConfig().then(c => setItems(c.saved_proxies || [])).catch(() => toast.error("加载失败")).finally(() => setLoading(false)); }, []);
+  useEffect(() => { api.getConfig().then(c => setItems(c.saved_proxies || [])).catch(e => { if (e?.status !== 401) toast.error("加载失败"); }).finally(() => setLoading(false)); }, []);
   const save = async (e) => { e.preventDefault(); if (!form.name.trim() || !form.url.trim()) return toast.error("请填写名称和地址");
     const next = [...items.filter(x => x.id !== form.id), {...form, name: form.name.trim(), url: form.url.trim()}];
     try { await api.putConfig({saved_proxies: next}); setItems(next); setForm(blank()); toast.success("已保存"); } catch (e) { toast.error(e.body?.detail || "代理地址无效"); }

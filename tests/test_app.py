@@ -280,3 +280,84 @@ def test_xui_cleanup_endpoint(tmp_path, monkeypatch):
     r = c.post("/api/xui/cleanup")
     assert r.status_code == 200
     assert r.json() == {"results": {"n1": 3, "n2": 0}, "total": 3}
+
+
+# ---- 登录流程加固 ----
+
+
+def test_login_unicode_password(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "密码🔑"})
+    c = _client(tmp_path)
+    assert c.post("/api/login", json={"password": "错的"}).status_code == 401
+    assert c.post("/api/login", json={"password": "密码🔑"}).status_code == 200
+    assert c.get("/api/runs").status_code == 200
+
+
+def test_login_bad_body_is_401_not_500(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    c = _client(tmp_path)
+    assert c.post("/api/login").status_code == 401
+    assert c.post("/api/login", content=b"not json",
+                  headers={"content-type": "application/json"}).status_code == 401
+    assert c.post("/api/login", json=["pw"]).status_code == 401
+    assert c.post("/api/login", json={"password": None}).status_code == 401
+    assert c.post("/api/login", json={"password": 123}).status_code == 401
+
+
+def test_login_rejected_in_bootstrap(tmp_path):
+    c = _client(tmp_path)  # 未设密码
+    r = c.post("/api/login", json={"password": ""})
+    assert r.status_code == 401
+    assert "尚未设置密码" in r.json()["detail"]
+    assert "set-cookie" not in r.headers
+    # 引导态仍可读配置以便设置密码
+    assert c.get("/api/config").status_code == 200
+
+
+def test_login_cookie_attributes(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    c = _client(tmp_path)
+    r = c.post("/api/login", json={"password": "pw"})
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie
+    assert "samesite=lax" in cookie
+    assert "max-age=604800" in cookie
+    assert "path=/" in cookie
+    assert "secure" not in cookie
+
+
+def test_login_cookie_secure_behind_https_proxy(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    c = _client(tmp_path)
+    r = c.post("/api/login", json={"password": "pw"},
+               headers={"x-forwarded-proto": "https, http"})
+    assert "secure" in r.headers["set-cookie"].lower()
+
+
+def test_logout_clears_session(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    c = _client(tmp_path)
+    c.post("/api/login", json={"password": "pw"})
+    assert c.get("/api/runs").status_code == 200
+    r = c.post("/api/logout")
+    assert r.status_code == 200
+    assert "cr_session" in r.headers["set-cookie"]
+    assert c.get("/api/runs").status_code == 401
+
+
+def test_password_change_invalidates_session(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    c = _client(tmp_path)
+    c.post("/api/login", json={"password": "pw"})
+    assert c.put("/api/config", json={"panel_password": "new"}).status_code == 200
+    assert c.get("/api/config").status_code == 401
+    assert c.post("/api/login", json={"password": "new"}).status_code == 200
+    assert c.get("/api/config").status_code == 200
+
+
+def test_empty_password_in_put_keeps_existing(tmp_path):
+    save_config(tmp_path / "config.yaml", {"panel_password": "pw"})
+    c = _client(tmp_path)
+    c.post("/api/login", json={"password": "pw"})
+    assert c.put("/api/config", json={"panel_password": "", "panel_port": 8790}).status_code == 200
+    assert c.get("/api/config").json()["panel_password"] == "pw"

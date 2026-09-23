@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 import asyncio
-import hmac
 import httpx
 from pathlib import Path
 
@@ -61,15 +60,36 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
 
     @app.post("/api/login")
     async def login(request: Request, response: Response):
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — 缺体/非 JSON 属于客户端错误，不能 500
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
         cfg = state.config()
-        password = body.get("password", "")
-        # 常量时间比较，避免密码校验的时序侧信道。空密码（首次配置）保持旧行为：
-        # compare_digest("", "") 为真即放行。
-        if not hmac.compare_digest(password, cfg.panel_password):
-            raise HTTPException(status_code=401, detail="密码错误")
+        # 常量时间比较（兼容非 ASCII 密码与非字符串输入）。未设密码时一律拒绝：
+        # 引导态不签发任何会话，避免发出立刻失效的「假登录成功」。
+        if not auth.passwords_match(body.get("password"), cfg.panel_password):
+            detail = "面板尚未设置密码，请先在设置页设定" if not cfg.panel_password else "密码错误"
+            raise HTTPException(status_code=401, detail=detail)
         token = auth.make_token(cfg.panel_password, state.secret)
-        response.set_cookie(auth.COOKIE_NAME, token, httponly=True, samesite="lax")
+        response.set_cookie(
+            auth.COOKIE_NAME,
+            token,
+            httponly=True,
+            samesite="lax",
+            max_age=auth.SESSION_MAX_AGE,
+            # 反代终结 HTTPS 时跟着置 Secure，纯 HTTP 部署不置（否则 cookie 存不下）。
+            # 多级代理时该头可能是 "https, http"，以最外层（第一个）为准。
+            secure=request.headers.get("x-forwarded-proto", request.url.scheme)
+            .split(",")[0].strip().lower() == "https",
+            path="/",
+        )
+        return {"ok": True}
+
+    @app.post("/api/logout")
+    def logout(response: Response):
+        response.delete_cookie(auth.COOKIE_NAME, path="/")
         return {"ok": True}
 
     @app.get("/api/config")

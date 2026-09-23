@@ -37,20 +37,20 @@ def test_dead_403_json():
     assert status == "dead"
 
 
-def test_cf_shield_403_html_is_error():
+def test_cf_shield_403_html_is_blocked():
     def handler(req):
         return httpx.Response(403, headers={"cf-mitigated": "challenge"},
                               text="<!DOCTYPE html><html>Just a moment...</html>")
     make, _ = _factory(handler)
     status, detail = check_session("sk-x", client_factory=make)
-    assert status == "error"
+    assert status == "blocked"
     assert "盾" in detail or "cloudflare" in detail.lower()
 
 
-def test_403_html_without_header_is_error():
+def test_403_html_without_header_is_blocked():
     make, _ = _factory(lambda req: httpx.Response(403, text="<html>blocked</html>"))
     status, _ = check_session("sk-x", client_factory=make)
-    assert status == "error"
+    assert status == "blocked"
 
 
 def test_connect_error_is_error():
