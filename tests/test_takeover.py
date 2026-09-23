@@ -44,9 +44,22 @@ class FakeBrowser:
         return "sk-new"
 
 
+class FakeFitter:
+    def __init__(self, display, events=None):
+        self.display = display
+        self.stopped = False
+        self._events = events
+
+    def stop(self):
+        self.stopped = True
+        if self._events is not None:
+            self._events.append("fitter.stop")
+
+
 def _mgr(**kw):
     return TakeoverManager(
         now_fn=_now,
+        window_fitter_fn=kw.pop("window_fitter_fn", lambda display: FakeFitter(display)),
         launcher=kw.pop("launcher", FakeLauncher()),
         browser_fn=kw.pop("browser_fn", lambda **k: FakeBrowser()),
         wait_display_fn=kw.pop("wait_display_fn", lambda display: None),
@@ -278,3 +291,64 @@ def test_start_rolls_back_when_xpra_web_port_never_opens():
     with pytest.raises(TakeoverError, match="14500"):
         m.start(email="a@x.com", session_key="sk", idle_timeout_s=999)
     assert all(p.terminated for p in launcher.spawned)
+
+
+# ---- 窗口自适应（桌面无窗口管理器，浏览器窗口需铺满 Xpra 桌面）----
+
+
+def test_window_fitter_started_for_display_and_stopped_before_browser_close():
+    events = []
+    fitters = []
+
+    class OrderedBrowser(FakeBrowser):
+        def close(self):
+            events.append("browser.close")
+            super().close()
+
+    def fitter_fn(display):
+        events.append("fitter.start")
+        f = FakeFitter(display, events)
+        fitters.append(f)
+        return f
+
+    m = _mgr(browser_fn=lambda **k: OrderedBrowser(), window_fitter_fn=fitter_fn,
+             display=":123")
+    m.start(email="a@x.com", session_key="sk")
+    assert [f.display for f in fitters] == [":123"]
+    assert not fitters[0].stopped
+    m.stop()
+    assert fitters[0].stopped
+    # 先停自适应再关浏览器，避免它操作正在销毁的窗口
+    assert events == ["fitter.start", "fitter.stop", "browser.close"]
+
+
+def test_window_fitter_not_started_when_browser_fails():
+    started = []
+
+    def bad_browser(**k):
+        raise RuntimeError("boom")
+
+    m = _mgr(browser_fn=bad_browser, window_fitter_fn=lambda d: started.append(d))
+    with pytest.raises(TakeoverError):
+        m.start(email="a@x.com", session_key="sk")
+    assert started == []
+
+
+def test_start_rolls_back_when_window_fitter_fails():
+    launcher = FakeLauncher()
+    browsers = []
+
+    def bf(**k):
+        b = FakeBrowser()
+        browsers.append(b)
+        return b
+
+    def bad_fitter(display):
+        raise RuntimeError("no X")
+
+    m = _mgr(launcher=launcher, browser_fn=bf, window_fitter_fn=bad_fitter)
+    with pytest.raises(TakeoverError):
+        m.start(email="a@x.com", session_key="sk")
+    assert browsers and browsers[0].closed
+    assert all(p.terminated for p in launcher.spawned)
+    assert m.status()["running"] is False

@@ -103,6 +103,76 @@
         heartbeat();
         recoverViewer();
       });
+
+      // —— 画面尺寸跟随 ——
+      // Xpra 5.1 + Xvfb 下只有「客户端建连」这条路会为画布尺寸新增精确的 RandR
+      // 分辨率。客户端自带的 window.resize 处理会同时发 desktop_size 和桌面窗口的
+      // configure-window，后者在 Xvfb 上只能选已有的最近分辨率（实测会跳回
+      // 8192x4096 或停在旧尺寸），两者还会互相打架。所以改为：卸掉客户端自己
+      // 的 resize 监听，窗口尺寸稳定后由本页重连一次，让桌面精确匹配新尺寸；
+      // 服务端的窗口自适应（server/window_fit.py）再把浏览器窗口铺满桌面。
+      const RESIZE_SETTLE_MS = 700;
+      const RESIZE_TOLERANCE = 4;
+      let connectedSize = null;
+      let resizeTimer;
+      let unbindTimer;
+
+      function viewerSize() {
+        return [viewer.clientWidth, viewer.clientHeight];
+      }
+
+      function detachClientResize() {
+        // Xpra 客户端在构造时用 jQuery(window).resize(...) 绑定；页面加载完成的
+        // 时机不确定，轮询到 client 出现再卸载。失败（如 Xpra 换了实现）时
+        // 仍会重连，只是可能多一次闪烁。
+        clearInterval(unbindTimer);
+        let tries = 0;
+        unbindTimer = setInterval(() => {
+          tries += 1;
+          try {
+            const w = viewer.contentWindow;
+            if (w && w.client && w.jQuery) {
+              w.jQuery(w).off("resize");
+              clearInterval(unbindTimer);
+              return;
+            }
+          } catch {
+            // iframe 尚未就绪，继续等。
+          }
+          if (tries >= 40) clearInterval(unbindTimer);
+        }, 250);
+      }
+
+      viewer.addEventListener("load", onViewerLoad);
+      function onViewerLoad() {
+        connectedSize = viewerSize();
+        detachClientResize();
+      }
+      try {
+        if (viewer.contentDocument && viewer.contentDocument.readyState === "complete"
+            && viewer.contentWindow.location.pathname.startsWith("/vnc/")) {
+          onViewerLoad();
+        }
+      } catch {
+        // 还在加载，等 load 事件。
+      }
+
+      window.addEventListener("resize", () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          if (!connectedSize) return;
+          const [w, h] = viewerSize();
+          if (
+            Math.abs(w - connectedSize[0]) <= RESIZE_TOLERANCE &&
+            Math.abs(h - connectedSize[1]) <= RESIZE_TOLERANCE
+          ) {
+            return;
+          }
+          connectedSize = [w, h];
+          disconnectedAt = 0;
+          viewer.src = viewer.src; // 重连：按新画布尺寸精确调整远程桌面
+        }, RESIZE_SETTLE_MS);
+      });
       heartbeatTimer = setInterval(heartbeat, 20_000);
       viewerHealthTimer = setInterval(recoverViewer, 5_000);
       heartbeat();
