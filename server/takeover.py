@@ -43,11 +43,16 @@ def _terminate(proc) -> None:
 
 class TakeoverManager:
     def __init__(self, *, now_fn, launcher=None, browser_fn=None,
-                 wait_display_fn=None, wait_web_fn=None,
+                 wait_display_fn=None, wait_web_fn=None, window_fitter_fn=None,
                  display=":100", web_port=14500):
         self.now_fn = now_fn
         self.launcher = launcher or ProcessLauncher()
         self._browser_fn = browser_fn
+        if window_fitter_fn is not None:
+            self._window_fitter_fn = window_fitter_fn
+        else:
+            from server.window_fit import WindowFitter
+            self._window_fitter_fn = lambda display: WindowFitter(display).start()
         if wait_display_fn is not None:
             self._wait_display = wait_display_fn
         else:
@@ -67,6 +72,7 @@ class TakeoverManager:
         self._xpra = None
         self._browser = None
         self._browser_executor = None
+        self._window_fitter = None
         self._timer = None
         self._timer_generation = 0
         self._idle_timeout_s = 0.0
@@ -129,6 +135,9 @@ class TakeoverManager:
                     proxy=proxy,
                     display=self.display,
                 ).result()
+                # 桌面没有窗口管理器：由它把浏览器窗口持续铺满 Xpra 桌面，
+                # 否则固定 1280x900 的窗口在宽屏右侧留黑、在矮视窗底部被裁掉。
+                self._window_fitter = self._window_fitter_fn(self.display)
             except Exception as exc:  # noqa: BLE001
                 console.log(f"启动接管会话失败：{exc}")
                 self._teardown()
@@ -197,6 +206,14 @@ class TakeoverManager:
             self._idle_timeout_s = 0.0
 
     def _teardown(self):
+        # 先停窗口自适应，免得它在浏览器/X 桌面关闭过程中还在操作窗口。
+        fitter = self._window_fitter
+        self._window_fitter = None
+        if fitter is not None:
+            try:
+                fitter.stop()
+            except Exception as exc:  # noqa: BLE001
+                console.log(f"停止接管窗口自适应失败：{exc}")
         browser = self._browser
         browser_executor = self._browser_executor
         self._browser = None

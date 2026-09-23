@@ -57,3 +57,16 @@ def test_takeover_wrapper_keeps_session_alive():
     assert "viewerHealthTimer = setInterval(recoverViewer, 5_000)" in page
     assert 'fetch("/api/takeover/heartbeat"' in page
     assert "setInterval(heartbeat, 20_000)" in page
+
+
+def test_takeover_wrapper_reconnects_on_resize_instead_of_xpra_resize():
+    """Xpra 5.1 + Xvfb 只有建连时能精确匹配画布；运行中 resize 会跳到最近的已有分辨率。
+
+    页面必须卸掉 Xpra 客户端自带的 resize 监听，并在尺寸稳定后重连。
+    """
+    page = (ROOT / "web" / "public" / "takeover.html").read_text(encoding="utf-8")
+
+    assert 'w.jQuery(w).off("resize")' in page
+    assert 'window.addEventListener("resize"' in page
+    assert "RESIZE_SETTLE_MS" in page
+    assert "viewer.src = viewer.src; // 重连" in page
