@@ -56,6 +56,55 @@ docker compose up -d
   接管提示条点击「重新自动登录」：系统会在当前接管浏览器里重新提交邮箱、收取并打开
   新的登录链接，成功后自动回写 sessionKey；如果账号确实被封则会明确报错且不会循环重试。
 
+## 开放 API（触发注册、按需导出）
+
+供外部脚本调用，与面板登录互相独立。在面板「系统设置 → 开放 API」打开开关并保存，再点
+「生成」得到 API Key（生成即生效；重新生成后旧 Key 立即失效）。请求头任选其一：
+
+```
+Authorization: Bearer <key>
+X-API-Key: <key>
+```
+
+不接受把 Key 放在 URL 参数里（会落进访问日志）。未启用返回 403，Key 错误返回 401。
+
+| 接口 | 说明 |
+|---|---|
+| `POST /api/v1/register` | 触发一次注册。body 可选 `email`（指定邮箱）、`domain`、`proxy_id`（代理池里的 id）。返回 `202 {"run_id", "status": "running"}`；已有任务在跑返回 `409 {"active_run_id"}` |
+| `GET /api/v1/register/{run_id}` | 查询结果。`wait`（0–50 秒）长轮询；`fields` 选择返回字段；`format=text/csv/line` 时额外返回 `export` 文本（`line` 可用 `sep` 指定分隔符，默认 `----`） |
+| `GET /api/v1/accounts/export` | 批量导出。`fields`、`format`（`json` 默认 / `text` / `csv` / `line`）、`sep`，过滤：`status`（`success`/`needs_manual`）、`check_status`（`alive`/`dead`/…）、`emails`（逗号分隔）。响应头 `X-Total-Count` 为条数 |
+| `GET /api/v1/fields` | 可选字段与格式 |
+| `GET /api/v1/proxies` | 代理池里的 `id` 与名称（不返回地址和凭据） |
+
+注册结果 `status`：`running` 进行中、`success` 成功（拿到 sessionKey）、`needs_manual` 流程跑完但没拿到
+sessionKey（账号已入库，可在面板接管）、`failed` 失败；后两者附带最近日志 `log_tail`。
+
+可选字段（`fields`，逗号分隔，按给出的顺序输出）：`email`、`session_key`、`proxy`、`mail_base_url`、
+`mail_key`、`password`、`display_name`、`domain`、`status`、`check_status`、`checked_at`、`created_at`、
+`last_run_id`。默认是前五项，`text` 格式与面板「导出」的默认输出一致。
+
+示例：触发注册 → 等到完成 → 取邮箱 + sessionKey + 密码：
+
+```bash
+KEY=cr_xxx; BASE=http://10.1.42.1:8790/api/v1
+RID=$(curl -s -X POST -H "Authorization: Bearer $KEY" $BASE/register | jq .run_id)
+while :; do
+  R=$(curl -s -H "Authorization: Bearer $KEY" \
+    "$BASE/register/$RID?wait=50&fields=email,session_key,password&format=line")
+  [ "$(echo "$R" | jq -r .status)" != running ] && break
+done
+echo "$R" | jq -r '.status, .export'   # success / email----sessionKey----password
+```
+
+批量导出所有检测有效的账号为 CSV：
+
+```bash
+curl -H "Authorization: Bearer $KEY" \
+  "$BASE/accounts/export?format=csv&check_status=alive&fields=email,session_key,proxy" -o alive.csv
+```
+
+面板账号页的「导出…」同样可以勾选字段、选格式和范围，并记住上次的选择。
+
 ## 启动（CLI）
 
 选后缀 → 建邮箱 → 自动登录：

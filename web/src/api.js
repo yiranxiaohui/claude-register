@@ -54,8 +54,8 @@ export const api = {
 
   listAccounts: () => fetch("/api/accounts").then(j),
 
-  exportAccountsText: () =>
-    fetch("/api/accounts/export").then((r) => {
+  exportAccountsText: (params) =>
+    fetch(`/api/accounts/export${params ? `?${new URLSearchParams(params)}` : ""}`).then((r) => {
       if (!r.ok) {
         if (r.status === 401) window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
         const err = new Error(`http ${r.status}`);
@@ -64,6 +64,10 @@ export const api = {
       }
       return r.text();
     }),
+
+  exportFields: () => fetch("/api/export/fields").then(j),
+
+  rotateApiKey: () => fetch("/api/api-key", { method: "POST" }).then(j),
 
   accountUpdate: (email, fields) =>
     fetch(`/api/accounts/${encodeURIComponent(email)}`, {

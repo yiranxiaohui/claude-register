@@ -6,6 +6,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 const GROUPS = [
   {
@@ -38,7 +48,123 @@ const GROUPS = [
       },
     ],
   },
+  {
+    title: "开放 API",
+    fields: [
+      { key: "api_enabled", label: "启用开放 API（/api/v1/*）", type: "checkbox" },
+      { key: "api_key", label: "API Key", type: "apikey" },
+    ],
+  },
 ];
+
+function ApiKeyField({ value, onRotated }) {
+  const [shown, setShown] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function rotate() {
+    setBusy(true);
+    try {
+      const { api_key } = await api.rotateApiKey();
+      onRotated(api_key);
+      setShown(true);
+      toast.success(value ? "已生成新 Key，旧 Key 立即失效" : "已生成 API Key");
+    } catch (err) {
+      if (err?.status !== 401) toast.error("生成失败，请重试");
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  }
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success("已复制");
+    } catch {
+      // 非 HTTPS 页面没有剪贴板权限：显示出来让用户手动复制
+      setShown(true);
+      toast.error("浏览器不允许自动复制，请手动选中复制");
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor="api_key">API Key</Label>
+      <div className="flex gap-2">
+        <Input
+          id="api_key"
+          readOnly
+          type={shown ? "text" : "password"}
+          value={value || ""}
+          placeholder="尚未生成"
+          className="font-mono"
+          onFocus={(e) => shown && e.target.select()}
+        />
+        {value && (
+          <>
+            <Button type="button" variant="outline" onClick={() => setShown((v) => !v)}>
+              {shown ? "隐藏" : "显示"}
+            </Button>
+            <Button type="button" variant="outline" onClick={copy}>复制</Button>
+          </>
+        )}
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy}
+          onClick={() => (value ? setConfirming(true) : rotate())}
+        >
+          {value ? "重新生成" : "生成"}
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        调用时放在请求头 <code>Authorization: Bearer &lt;key&gt;</code> 或 <code>X-API-Key</code>。
+        生成后立即生效，无需再点保存。
+      </p>
+      <AlertDialog open={confirming} onOpenChange={setConfirming}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>重新生成 API Key？</AlertDialogTitle>
+            <AlertDialogDescription>
+              旧 Key 会立即失效，正在使用它的脚本需要换成新 Key。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={rotate}>重新生成</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+function ApiUsage() {
+  const base = `${window.location.origin}/api/v1`;
+  const example = [
+    `# 1. 触发注册（可选 body：{"email": "...", "proxy_id": "..."}）`,
+    `curl -X POST -H "Authorization: Bearer $KEY" ${base}/register`,
+    `# → {"run_id": 12, "status": "running"}`,
+    ``,
+    `# 2. 等结果（wait 最长 50 秒，未完成就重复调用），只取需要的字段`,
+    `curl -H "Authorization: Bearer $KEY" \\`,
+    `  "${base}/register/12?wait=50&fields=email,session_key,password"`,
+    ``,
+    `# 3. 批量导出（format: text/json/csv/line；可按 status/check_status/emails 过滤）`,
+    `curl -H "Authorization: Bearer $KEY" \\`,
+    `  "${base}/accounts/export?format=line&fields=email,session_key&status=success"`,
+  ].join("\n");
+  return (
+    <details className="text-sm">
+      <summary className="cursor-pointer text-muted-foreground">调用示例</summary>
+      <pre className="mt-2 overflow-x-auto rounded-md bg-muted p-3 text-xs leading-5">{example}</pre>
+      <p className="mt-1 text-xs text-muted-foreground">
+        可用字段：GET {base}/fields；可选代理：GET {base}/proxies。完整说明见 README「开放 API」。
+      </p>
+    </details>
+  );
+}
 
 const OWN_KEYS = GROUPS.flatMap((g) => g.fields.map((f) => f.key));
 
@@ -104,7 +230,13 @@ export default function Settings({ onPasswordSet }) {
             </CardHeader>
             <CardContent className="space-y-4">
               {group.fields.map((f) =>
-                f.type === "checkbox" ? (
+                f.type === "apikey" ? (
+                  <ApiKeyField
+                    key={f.key}
+                    value={form[f.key]}
+                    onRotated={(k) => setField(f.key, k)}
+                  />
+                ) : f.type === "checkbox" ? (
                   <div className="flex items-center justify-between" key={f.key}>
                     <Label htmlFor={f.key}>{f.label}</Label>
                     <Switch
@@ -133,6 +265,7 @@ export default function Settings({ onPasswordSet }) {
                   </div>
                 ),
               )}
+              {group.title === "开放 API" && <ApiUsage />}
             </CardContent>
           </Card>
         ))}

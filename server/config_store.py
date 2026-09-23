@@ -29,6 +29,9 @@ class Config:
     xui_nodes: tuple = ()
     takeover_enabled: bool = True
     takeover_idle_timeout_min: int = 15
+    # 开放 API（/api/v1/*）：独立于面板登录，用 API Key 鉴权；默认关闭。
+    api_enabled: bool = False
+    api_key: str = ""
 
 
 _NODE_KEYS = ("name", "base_url", "username", "password", "proxy_host")
@@ -50,6 +53,7 @@ def load_config(path: Path) -> Config:
     pr = xui.get("port_range") or [40000, 60000]
     nodes = tuple(_load_node(n) for n in (xui.get("nodes") or []))
     tk = raw.get("takeover", {}) or {}
+    api = raw.get("api", {}) or {}
     return Config(
         panel_password=str(panel.get("password", "") or ""),
         panel_port=int(panel.get("port", 8790)),
@@ -69,6 +73,8 @@ def load_config(path: Path) -> Config:
         xui_nodes=nodes,
         takeover_enabled=bool(tk.get("enabled", True)),
         takeover_idle_timeout_min=int(tk.get("idle_timeout_min", 15)),
+        api_enabled=bool(api.get("enabled", False)),
+        api_key=str(api.get("key", "") or ""),
     )
 
 
@@ -85,6 +91,8 @@ _FIELD_MAP = {
     "register_proxy": ("register", "proxy"),
     "takeover_enabled": ("takeover", "enabled"),
     "takeover_idle_timeout_min": ("takeover", "idle_timeout_min"),
+    "api_enabled": ("api", "enabled"),
+    "api_key": ("api", "key"),
 }
 
 
@@ -92,7 +100,7 @@ def save_config(path: Path, updates: dict) -> Config:
     cfg = load_config(path)
     # 密码/密钥留空 = 不修改
     clean = dict(updates)
-    for secret in ("panel_password", "anymail_api_key"):
+    for secret in ("panel_password", "anymail_api_key", "api_key"):
         if secret in clean and clean[secret] in ("", REDACTED, None):
             clean.pop(secret)
     # xui 标量：不在 _FIELD_MAP，手动并入
@@ -115,7 +123,7 @@ def save_config(path: Path, updates: dict) -> Config:
                 node["password"] = old_by_base.get(node["base_url"], {}).get("password", "")
             merged.append(node)
         cfg = replace(cfg, xui_nodes=tuple(merged))
-    out: dict = {"panel": {}, "anymail": {}, "register": {}, "xui": {}, "takeover": {}}
+    out: dict = {"panel": {}, "anymail": {}, "register": {}, "xui": {}, "takeover": {}, "api": {}}
     for field, (section, key) in _FIELD_MAP.items():
         out[section][key] = getattr(cfg, field)
     out["register"]["proxies"] = [dict(p) for p in cfg.saved_proxies]

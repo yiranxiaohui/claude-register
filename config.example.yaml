@@ -13,3 +13,6 @@ register:
 takeover:
   enabled: true          # 是否允许 Xpra HTML5 免密接管
   idle_timeout_min: 15   # 接管页关闭/断网多少分钟后自动结束
+api:
+  enabled: false         # 开放 API（/api/v1/*）总开关
+  key: ""                # 在面板「设置 → 开放 API」生成；调用时放在 Authorization: Bearer <key>
