@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import asyncio
+import secrets
 import httpx
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from claude_register.console import log
 from claude_register.proxy_pool import ProxyPool, XuiNode
 from claude_register.session_check import check_session
 from claude_register.xui import XuiClient
-from server import auth, db
+from server import auth, db, export, open_api
 from server.config_store import save_config, to_dict
 from server.deps import AppState, default_now
 from server.runner import RunnerBusy
@@ -140,6 +141,17 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     @app.post("/api/runs")
     async def start_run(request: Request, _=Depends(require_auth)):
         body = await request.json() if await request.body() else {}
+        try:
+            rid = start_registration(body)
+        except RunnerBusy:
+            raise HTTPException(status_code=409, detail="已有任务在运行")
+        return {"run_id": rid}
+
+    def start_registration(body: dict) -> int:
+        """面板与开放 API 共用的注册入口：解析所选代理并启动 Runner。
+
+        代理不存在/无效抛 400；已有任务在跑抛 RunnerBusy，由调用方决定怎么回。
+        """
         cfg = state.config()
         proxy_id = body.get("proxy_id")
         if proxy_id is not None:
@@ -152,16 +164,12 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             except ValueError:
                 raise HTTPException(status_code=400, detail="所选代理地址无效，请编辑后重试") from None
             cfg = replace(cfg, register_proxy=selected["url"], xui_enabled=False)
-        try:
-            rid = state.runner.start(
-                cfg,
-                email=body.get("email"),
-                domain=body.get("domain"),
-                flow_fn=flow.run,
-            )
-        except RunnerBusy:
-            raise HTTPException(status_code=409, detail="已有任务在运行")
-        return {"run_id": rid}
+        return state.runner.start(
+            cfg,
+            email=body.get("email"),
+            domain=body.get("domain"),
+            flow_fn=flow.run,
+        )
 
     @app.get("/api/runs")
     def get_runs(limit: int = 50, offset: int = 0, _=Depends(require_auth)):
@@ -254,15 +262,31 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         return [{**r, "text": _account_text(r)} for r in _account_rows()]
 
     @app.get("/api/accounts/export")
-    def accounts_export(_=Depends(require_auth)):
-        text = "\n\n".join(_account_text(r) for r in _account_rows())
-        if text:
-            text += "\n"
-        return Response(
-            text,
-            media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="accounts.txt"'},
+    def accounts_export(
+        fields: str | None = None,
+        format: str = "text",
+        sep: str | None = None,
+        emails: str | None = None,
+        status: str | None = None,
+        check_status: str | None = None,
+        _=Depends(require_auth),
+    ):
+        # 不带参数时与旧版「导出全部」完全一致：默认五项字段 + text 格式。
+        return open_api.export_response(
+            _account_rows(), fields=fields, fmt=format, sep=sep, emails=emails,
+            status=status, check_status=check_status, download=True,
         )
+
+    @app.get("/api/export/fields")
+    def export_fields(_=Depends(require_auth)):
+        return export.describe()
+
+    @app.post("/api/api-key")
+    def rotate_api_key(_=Depends(require_auth)):
+        """生成新的开放 API Key 并立即生效（旧 Key 失效）。"""
+        key = "cr_" + secrets.token_urlsafe(32)
+        save_config(state.config_path, {"api_key": key})
+        return {"api_key": key}
 
     @app.patch("/api/accounts/{email}")
     async def account_update(email: str, request: Request, _=Depends(require_auth)):
@@ -491,6 +515,10 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         # server 关闭/重启时兜底清理接管会话，避免 Xpra/浏览器变孤儿进程。
         # stop() 幂等，没在跑也安全。
         state.takeover.stop()
+
+    open_api.register_open_api(
+        app, state, start_registration=start_registration, account_rows=_account_rows,
+    )
 
     # 前端（dist 存在才挂，测试环境无 dist 不报错）
     if WEB_DIST.exists():

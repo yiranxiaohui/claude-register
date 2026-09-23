@@ -4,6 +4,7 @@ import { Download } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/status-badge";
+import { ExportDialog } from "@/components/export-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -68,6 +69,7 @@ export default function Accounts({ attach, running, navigate }) {
   const [takeover, setTakeover] = useState({ running: false, email: null });
   const [relogging, setRelogging] = useState(false);
   const [checking, setChecking] = useState("");
+  const [exportOpen, setExportOpen] = useState(false);
   const [copiedEmail, setCopiedEmail] = useState("");
   const [editingEmail, setEditingEmail] = useState("");
   const [editForm, setEditForm] = useState({});
@@ -222,29 +224,14 @@ export default function Accounts({ attach, running, navigate }) {
     }
   };
 
-  async function exportAll() {
-    try {
-      const text = await api.exportAccountsText();
-      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "accounts.txt";
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      toast.error("导出失败，请重试");
-    }
-  }
-
   return (
     <>
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle>账号列表</CardTitle>
           {accounts.length > 0 && (
-            <Button variant="outline" size="sm" onClick={exportAll}>
-              <Download /> 导出全部
+            <Button variant="outline" size="sm" onClick={() => setExportOpen(true)}>
+              <Download /> 导出…
             </Button>
           )}
         </CardHeader>
@@ -429,6 +416,7 @@ export default function Accounts({ attach, running, navigate }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <ExportDialog open={exportOpen} onOpenChange={setExportOpen} />
     </>
   );
 }
