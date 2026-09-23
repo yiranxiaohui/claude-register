@@ -93,17 +93,36 @@ def test_no_proxy_passes_none():
     assert captured["proxy"] is None
 
 
-def test_default_client_constructs():
-    """生产工厂 _default_client 能正常构造 httpx.Client（不走网络、不 mock）。"""
-    with _default_client("http://1.2.3.4:8080") as client:
-        assert isinstance(client, httpx.Client)
+def test_default_client_direct_and_http_proxy_skip_relay():
+    """直连 / HTTP 代理：curl 自己连，不起中继。（只构造，不走网络）"""
     with _default_client(None) as client:
-        assert isinstance(client, httpx.Client)
+        assert client.proxy is None and not client.uses_relay
+    with _default_client("http://u:p@1.2.3.4:8080") as client:
+        assert client.proxy == "http://u:p@1.2.3.4:8080" and not client.uses_relay
 
 
-def test_default_client_constructs_socks5():
-    from claude_register.session_check import _default_client
-    import httpx
-    c = _default_client("socks5://u:p@1.2.3.4:1080")
-    assert isinstance(c, httpx.Client)
-    c.close()
+def test_default_client_noauth_socks_resolves_remotely():
+    """无凭据 SOCKS5 直接交给 curl，但必须 socks5h：本地 DNS 可能是 fake-ip。"""
+    with _default_client("socks5://1.2.3.4:1080") as client:
+        assert client.proxy == "socks5h://1.2.3.4:1080"
+        assert not client.uses_relay
+
+
+def test_default_client_auth_socks_goes_through_relay():
+    """带凭据 SOCKS5 走本地免认证中继，凭据不交给 curl。"""
+    client = _default_client("socks5://u:p@1.2.3.4:1080")
+    try:
+        assert client.uses_relay
+        assert client.proxy.startswith("socks5h://127.0.0.1:")
+        assert "u:p" not in client.proxy
+    finally:
+        client.close()
+    assert not client.uses_relay  # close() 连带停掉中继
+
+
+def test_default_client_uses_browser_impersonation():
+    from claude_register import session_check
+
+    assert session_check.IMPERSONATE
+    # 手写 UA 会跟模拟出的 TLS 指纹对不上，必须交给 impersonate
+    assert "User-Agent" not in session_check._HEADERS
