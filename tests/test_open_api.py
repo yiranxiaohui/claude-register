@@ -324,3 +324,102 @@ def test_panel_export_default_is_unchanged_and_supports_options(tmp_path):
     assert r.headers["content-disposition"] == 'attachment; filename="accounts.json"'
     assert json.loads(r.text) == [{"email": "a@x.com", "password": "pw-a"}]
     assert c.get("/api/export/fields").json()["default_fields"][0] == "email"
+
+
+# ---- 逐个获取（claim）----
+
+
+def _seed_claimable(app):
+    conn = app.state.cr.conn
+    for i, (email, check) in enumerate(
+        [("c1@x.com", ""), ("c2@x.com", "dead"), ("c3@x.com", "alive"), ("c4@x.com", "")], 1
+    ):
+        db.upsert_account(conn, email, "x.com", "", f"mb{i}", i, "success",
+                          password=f"pw{i}", session_key=f"sk-{i}")
+        if check:
+            db.update_account_check(conn, email, check, "2026-09-24T00:00:00Z")
+    db.upsert_account(conn, "manual@x.com", "x.com", "", "mb9", 9, "needs_manual")
+
+
+def test_v1_claim_one_at_a_time_and_marks_claimed(tmp_path):
+    app = _app(tmp_path)
+    _seed_claimable(app)
+    c = TestClient(app)
+    r = c.post("/api/v1/accounts/claim?fields=email,session_key", headers=H)
+    assert r.status_code == 200
+    assert r.json() == {
+        "email": "c1@x.com", "claimed_at": "2026-09-24T00:00:00Z",
+        "account": {"email": "c1@x.com", "session_key": "sk-1"}, "remaining": 2,
+    }
+    assert db.get_account(app.state.cr.conn, "c1@x.com")["claimed_at"] == "2026-09-24T00:00:00Z"
+    # dead 的 c2、needs_manual 的账号都被跳过；不重复发放
+    got = [c.post("/api/v1/accounts/claim", headers=H).json()["email"] for _ in range(2)]
+    assert got == ["c3@x.com", "c4@x.com"]
+    r = c.post("/api/v1/accounts/claim", headers=H)
+    assert r.status_code == 404 and r.json()["detail"] == "没有可获取的账号"
+
+
+def test_v1_claim_check_status_and_format(tmp_path):
+    app = _app(tmp_path)
+    _seed_claimable(app)
+    c = TestClient(app)
+    r = c.post("/api/v1/accounts/claim?check_status=alive&format=line&fields=email,password",
+               headers=H)
+    assert r.json()["email"] == "c3@x.com" and r.json()["export"] == "c3@x.com----pw3\n"
+    assert r.json()["remaining"] == 0
+    assert c.post("/api/v1/accounts/claim?check_status=alive", headers=H).status_code == 404
+    assert c.post("/api/v1/accounts/claim?check_status=bogus", headers=H).status_code == 400
+    assert c.post("/api/v1/accounts/claim?format=xml", headers=H).status_code == 400
+    assert c.post("/api/v1/accounts/claim").status_code == 401
+
+
+def test_v1_claim_concurrent_never_duplicates(tmp_path):
+    app = _app(tmp_path)
+    _seed_claimable(app)
+    c = TestClient(app)
+    results: list[int | str] = []
+
+    def worker():
+        r = c.post("/api/v1/accounts/claim", headers=H)
+        results.append(r.json()["email"] if r.status_code == 200 else r.status_code)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    emails = [x for x in results if isinstance(x, str)]
+    assert sorted(emails) == ["c1@x.com", "c3@x.com", "c4@x.com"]
+    assert results.count(404) == 5
+
+
+def test_claimed_export_filter_and_panel_toggle(tmp_path):
+    app = _app(tmp_path)
+    _seed_claimable(app)
+    c = TestClient(app)
+    c.post("/api/v1/accounts/claim", headers=H)
+    r = c.get("/api/v1/accounts/export?claimed=true&fields=email,claimed_at", headers=H)
+    assert r.json() == [{"email": "c1@x.com", "claimed_at": "2026-09-24T00:00:00Z"}]
+    r = c.get("/api/v1/accounts/export?claimed=false&fields=email", headers=H)
+    assert "c1@x.com" not in {x["email"] for x in r.json()}
+    assert c.get("/api/v1/accounts/export?claimed=maybe", headers=H).status_code == 400
+
+    c.post("/api/login", json={"password": "pw"})
+    r = c.put("/api/accounts/c1@x.com/claimed", json={"claimed": False})
+    assert r.status_code == 200 and r.json()["claimed_at"] == ""
+    # 取消标记后可再次被获取
+    assert c.post("/api/v1/accounts/claim", headers=H).json()["email"] == "c1@x.com"
+    assert c.put("/api/accounts/c4@x.com/claimed", json={"claimed": True}).json()["claimed_at"]
+    assert c.put("/api/accounts/c4@x.com/claimed", json={"claimed": "yes"}).status_code == 400
+    assert c.put("/api/accounts/none@x.com/claimed", json={"claimed": True}).status_code == 404
+    assert c.get("/api/accounts/export?claimed=true&format=line&fields=email").text == \
+        "c4@x.com\nc1@x.com\n"
+
+
+def test_claimed_at_survives_reregistration_upsert(tmp_path):
+    app = _app(tmp_path)
+    _seed_claimable(app)
+    conn = app.state.cr.conn
+    TestClient(app).post("/api/v1/accounts/claim", headers=H)
+    db.upsert_account(conn, "c1@x.com", "x.com", "", "mb1", 10, "success", session_key="sk-new")
+    assert db.get_account(conn, "c1@x.com")["claimed_at"] == "2026-09-24T00:00:00Z"

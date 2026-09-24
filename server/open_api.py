@@ -22,6 +22,7 @@ from server.runner import RunnerBusy
 # 长轮询上限：容器内 Nginx 对 / 的默认读超时是 60s，留足余量。
 MAX_WAIT_S = 50
 LOG_TAIL_LINES = 20
+CHECK_STATUSES = ("alive", "dead", "blocked", "error")
 
 
 # ---- 仅用于生成 OpenAPI 文档的模型（运行时校验仍走下面的手写逻辑，保持 400 语义）----
@@ -85,8 +86,18 @@ class ProxyItem(BaseModel):
     name: str
 
 
+class ClaimResult(BaseModel):
+    email: str = Field(description="被领取的账号邮箱")
+    claimed_at: str = Field(description="打上「已获取」标记的时间")
+    account: dict[str, Any] = Field(
+        description="账号信息，只含 fields 选择的字段",
+        examples=[{"email": "alice@example.com", "session_key": "sk-ant-sid01-..."}])
+    export: str | None = Field(None, description="format 为 text/csv/line 时才返回的导出文本")
+    remaining: int = Field(description="同样条件下剩余可领取的账号数")
+
+
 DOC_MODELS = (RegisterRequest, RegisterAccepted, RegisterBusy, RegisterResult,
-              ErrorResponse, FieldInfo, FieldsInfo, ProxyItem)
+              ErrorResponse, FieldInfo, FieldsInfo, ProxyItem, ClaimResult)
 _AUTH_ERRORS = {
     401: {"model": ErrorResponse, "description": "缺少或错误的 API Key"},
     403: {"model": ErrorResponse, "description": "服务未启用开放 API"},
@@ -139,16 +150,17 @@ def _split(raw: str | None) -> list[str]:
 
 
 def export_response(rows, *, fields, fmt, sep, emails, status, check_status,
-                    download: bool) -> Response:
+                    download: bool, claimed=None) -> Response:
     try:
         keys = export.parse_fields(fields)
         fmt = export.parse_format(fmt)
         sep = export.parse_sep(sep)
+        claimed_filter = export.parse_claimed(claimed)
     except export.ExportError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     picked = export.filter_rows(
         rows, emails=_split(emails), status=status or None,
-        check_status=check_status or None,
+        check_status=check_status or None, claimed=claimed_filter,
     )
     body, media = export.render(picked, keys, fmt, sep=sep)
     headers = {"X-Total-Count": str(len(picked))}
@@ -286,10 +298,56 @@ def register_open_api(app: FastAPI, state, *, start_registration, account_rows) 
         status: str | None = Query(None, description="注册状态：success / needs_manual"),
         check_status: str | None = Query(
             None, description="最近检测结果：alive / dead / blocked / error"),
+        claimed: str | None = Query(
+            None, description="true 只导出已获取的账号，false 只导出未获取的；不填不筛选",
+            json_schema_extra={"enum": ["true", "false"]}),
         _=Depends(require_api_key),
     ):
-        """按创建时间倒序导出已入库账号，可选字段、格式与筛选条件。"""
+        """按创建时间倒序导出已入库账号，可选字段、格式与筛选条件。不会打「已获取」标记。"""
         return export_response(
             account_rows(), fields=fields, fmt=format, sep=sep, emails=emails,
-            status=status, check_status=check_status, download=False,
+            status=status, check_status=check_status, download=False, claimed=claimed,
         )
+
+    @app.post(
+        "/api/v1/accounts/claim", tags=["导出"], summary="获取一个账号并标记为已获取",
+        responses={
+            200: {"model": ClaimResult, "description": "已领取的账号"},
+            400: {"model": ErrorResponse, "description": "参数不合法"},
+            404: {"model": ErrorResponse, "description": "没有可获取的账号"},
+            **_AUTH_ERRORS,
+        },
+    )
+    def v1_accounts_claim(
+        fields: str | None = Query(None, description=_FIELDS_DESC),
+        format: str = Query("json", description="设为 text/csv/line 时额外返回 export 文本",
+                            json_schema_extra={"enum": list(export.FORMATS)}),
+        sep: str | None = Query(None, description="format=line 的分隔符，默认 ----"),
+        check_status: str | None = Query(
+            None, description="只领取该检测结果的账号（如 alive）；不填时跳过 dead / blocked"),
+        _=Depends(require_api_key),
+    ):
+        """每调用一次领取一个「注册成功、有 sessionKey、未获取过」的账号（先入库先发），
+        并立即打上「已获取」标记，同一账号不会被重复领取。"""
+        try:
+            keys = export.parse_fields(fields)
+            fmt = export.parse_format(format)
+            line_sep = export.parse_sep(sep)
+        except export.ExportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if check_status is not None and check_status not in CHECK_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"check_status 只能是 {' / '.join(CHECK_STATUSES)}")
+        acct = db.claim_account(state.conn, state.now_fn(), check_status=check_status or None)
+        if acct is None:
+            raise HTTPException(status_code=404, detail="没有可获取的账号")
+        result = {
+            "email": acct["email"],
+            "claimed_at": acct["claimed_at"],
+            "account": export.pick(acct, keys),
+            "remaining": db.count_claimable(state.conn, check_status=check_status or None),
+        }
+        if fmt != "json":
+            result["export"] = export.render([acct], keys, fmt, sep=line_sep)[0]
+        return result

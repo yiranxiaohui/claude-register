@@ -84,7 +84,8 @@ X-API-Key: <key>
 |---|---|
 | `POST /api/v1/register` | 触发一次注册。body 可选 `email`（指定邮箱）、`domain`、`proxy_id`（代理池里的 id）。返回 `202 {"run_id", "status": "running"}`；已有任务在跑返回 `409 {"active_run_id"}` |
 | `GET /api/v1/register/{run_id}` | 查询结果。`wait`（0–50 秒）长轮询；`fields` 选择返回字段；`format=text/csv/line` 时额外返回 `export` 文本（`line` 可用 `sep` 指定分隔符，默认 `----`） |
-| `GET /api/v1/accounts/export` | 批量导出。`fields`、`format`（`json` 默认 / `text` / `csv` / `line`）、`sep`，过滤：`status`（`success`/`needs_manual`）、`check_status`（`alive`/`dead`/…）、`emails`（逗号分隔）。响应头 `X-Total-Count` 为条数 |
+| `GET /api/v1/accounts/export` | 批量导出。`fields`、`format`（`json` 默认 / `text` / `csv` / `line`）、`sep`，过滤：`status`（`success`/`needs_manual`）、`check_status`（`alive`/`dead`/…）、`claimed`（`true`/`false`）、`emails`（逗号分隔）。响应头 `X-Total-Count` 为条数 |
+| `POST /api/v1/accounts/claim` | 获取一个账号：每次返回一个注册成功、有 sessionKey、未获取过的账号（默认跳过检测为 `dead`/`blocked` 的，`check_status=alive` 可只取有效的），并标记为「已获取」，不会重复发放。支持 `fields`/`format`/`sep`；返回 `account`、`claimed_at`、`remaining`；没有可用账号返回 `404`。面板账号列表显示「已获取」标签，可在「编辑」里取消标记 |
 | `GET /api/v1/fields` | 可选字段与格式 |
 | `GET /api/v1/proxies` | 代理池里的 `id` 与名称（不返回地址和凭据） |
 
@@ -93,7 +94,7 @@ sessionKey（账号已入库，可在面板接管）、`failed` 失败；后两�
 
 可选字段（`fields`，逗号分隔，按给出的顺序输出）：`email`、`session_key`、`proxy`、`mail_base_url`、
 `mail_key`、`password`、`display_name`、`domain`、`status`、`check_status`、`checked_at`、`created_at`、
-`last_run_id`。默认是前五项，`text` 格式与面板「导出」的默认输出一致。
+`claimed_at`、`last_run_id`。默认是前五项，`text` 格式与面板「导出」的默认输出一致。
 
 示例：触发注册 → 等到完成 → 取邮箱 + sessionKey + 密码：
 

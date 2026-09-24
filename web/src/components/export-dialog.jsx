@@ -28,6 +28,8 @@ const SCOPES = [
   ["all", "全部账号", {}],
   ["success", "仅注册成功（有 sessionKey）", { status: "success" }],
   ["alive", "仅检测有效", { check_status: "alive" }],
+  ["unclaimed", "仅未获取", { claimed: "false" }],
+  ["claimed", "仅已获取", { claimed: "true" }],
 ];
 
 const EXT = { text: "txt", line: "txt", csv: "csv", json: "json" };

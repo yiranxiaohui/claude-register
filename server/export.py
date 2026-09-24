@@ -32,6 +32,7 @@ FIELDS: tuple[ExportField, ...] = (
     ExportField("check_status", "checkStatus", "检测结果"),
     ExportField("checked_at", "checkedAt", "检测时间"),
     ExportField("created_at", "createdAt", "创建时间"),
+    ExportField("claimed_at", "claimedAt", "获取时间"),
     ExportField("last_run_id", "runId", "注册任务 ID"),
 )
 FIELD_BY_KEY = {f.key: f for f in FIELDS}
@@ -79,6 +80,22 @@ def parse_sep(raw) -> str:
     return sep
 
 
+_TRUE = ("1", "true", "yes")
+_FALSE = ("0", "false", "no")
+
+
+def parse_claimed(raw) -> bool | None:
+    """claimed 筛选：true/1/yes → 只要已获取；false/0/no → 只要未获取；空 → 不筛选。"""
+    if raw is None or str(raw).strip() == "":
+        return None
+    val = str(raw).strip().lower()
+    if val in _TRUE:
+        return True
+    if val in _FALSE:
+        return False
+    raise ExportError("claimed 只能是 true 或 false")
+
+
 def pick(row: dict, fields) -> dict:
     """按字段挑出值；缺失/None 统一成空串（last_run_id 保留整数）。"""
     out = {}
@@ -92,7 +109,8 @@ def pick(row: dict, fields) -> dict:
     return out
 
 
-def filter_rows(rows, *, emails=None, status=None, check_status=None) -> list[dict]:
+def filter_rows(rows, *, emails=None, status=None, check_status=None,
+                claimed: bool | None = None) -> list[dict]:
     wanted = {e.strip().lower() for e in (emails or []) if e and e.strip()}
     out = []
     for row in rows:
@@ -101,6 +119,8 @@ def filter_rows(rows, *, emails=None, status=None, check_status=None) -> list[di
         if status and (row.get("status") or "") != status:
             continue
         if check_status and (row.get("check_status") or "") != check_status:
+            continue
+        if claimed is not None and bool(row.get("claimed_at")) != claimed:
             continue
         out.append(row)
     return out
