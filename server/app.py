@@ -271,12 +271,13 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         emails: str | None = None,
         status: str | None = None,
         check_status: str | None = None,
+        claimed: str | None = None,
         _=Depends(require_auth),
     ):
         # 不带参数时与旧版「导出全部」完全一致：默认五项字段 + text 格式。
         return open_api.export_response(
             _account_rows(), fields=fields, fmt=format, sep=sep, emails=emails,
-            status=status, check_status=check_status, download=True,
+            status=status, check_status=check_status, download=True, claimed=claimed,
         )
 
     @app.get("/api/export/fields")
@@ -299,6 +300,18 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         if not fields:
             raise HTTPException(status_code=400, detail="没有可更新的字段")
         db.update_account_fields(state.conn, email, fields)
+        row = db.get_account(state.conn, email)
+        return {**row, "text": _account_text(row)}
+
+    @app.put("/api/accounts/{email}/claimed")
+    async def account_set_claimed(email: str, request: Request, _=Depends(require_auth)):
+        """面板手动标记 / 取消「已获取」。body: {"claimed": true|false}。"""
+        body = await request.json() if await request.body() else {}
+        claimed = body.get("claimed") if isinstance(body, dict) else None
+        if not isinstance(claimed, bool):
+            raise HTTPException(status_code=400, detail="claimed 必须是布尔值")
+        if not db.set_account_claimed(state.conn, email, state.now_fn() if claimed else ""):
+            raise HTTPException(status_code=404, detail="账号不存在")
         row = db.get_account(state.conn, email)
         return {**row, "text": _account_text(row)}
 

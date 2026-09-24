@@ -8,7 +8,8 @@ claude-register 是一个自动注册 claude.ai 账号的服务。开放 API 让
 
 1. **触发一次自动注册**（后台运行，通常需要 1–5 分钟）；
 2. **查询注册结果**，成功后按需选择返回哪些账号信息；
-3. **批量导出账号**，可选字段、格式和筛选条件。
+3. **批量导出账号**，可选字段、格式和筛选条件；
+4. **逐个获取账号**：每调用一次拿到一个可用账号，并自动标记为「已获取」，不会重复发放。
 
 - Base URL：`{{BASE_URL}}/api/v1`
 - 编码：请求与响应均为 UTF-8；JSON 请求需带 `Content-Type: application/json`
@@ -72,6 +73,7 @@ else:
 | `POST` | `/api/v1/register` | 触发一次自动注册 |
 | `GET` | `/api/v1/register/{run_id}` | 查询注册结果（支持长轮询、字段选择） |
 | `GET` | `/api/v1/accounts/export` | 批量导出账号 |
+| `POST` | `/api/v1/accounts/claim` | 获取一个账号并标记为已获取 |
 | `GET` | `/api/v1/fields` | 可导出的字段与格式 |
 | `GET` | `/api/v1/proxies` | 可选的注册代理 |
 
@@ -143,7 +145,9 @@ else:
 | `status` | 不筛选 | 注册状态：`success` / `needs_manual` |
 | `check_status` | 不筛选 | 最近一次存活检测结果：`alive` / `dead` / `blocked` / `error` |
 | `emails` | 不筛选 | 逗号分隔的邮箱列表（不区分大小写） |
+| `claimed` | 不筛选 | `true` 只导出已获取的账号，`false` 只导出未获取的 |
 
+- 批量导出**不会**打「已获取」标记；需要逐个发放账号时请用 `POST /api/v1/accounts/claim`。
 - 响应体为对应格式的内容；响应头 `X-Total-Count` 为导出条数。
 - 没有符合条件的账号时返回空内容（`json` 为 `[]`），状态码仍为 `200`。
 
@@ -157,6 +161,46 @@ curl -H "Authorization: Bearer $KEY" \
 # 指定邮箱，单行格式：email----sessionKey
 curl -H "Authorization: Bearer $KEY" \
   "$BASE/accounts/export?format=line&fields=email,session_key&emails=a@x.com,b@x.com"
+```
+
+### POST /api/v1/accounts/claim
+
+获取一个账号：每调用一次返回**一个**可用账号，并立即打上「已获取」标记（记录 `claimed_at`）。
+已获取的账号不会再被发放；并发调用也不会拿到同一个账号。
+
+可获取的账号：注册状态为 `success`、有 sessionKey、尚未被获取；默认跳过最近检测为 `dead` /
+`blocked` 的账号。按入库顺序先进先出。
+
+| Query 参数 | 默认 | 说明 |
+|---|---|---|
+| `fields` | 默认五项 | 逗号分隔的字段名，决定 `account` 里返回哪些信息 |
+| `format` | `json` | 设为 `text` / `csv` / `line` 时，额外返回 `export` 文本 |
+| `sep` | `----` | `format=line` 时的分隔符 |
+| `check_status` | 不筛选 | 只获取该检测结果的账号，如 `alive`（只发最近检测有效的） |
+
+响应 `200`：
+
+```json
+{
+  "email": "alice@example.com",
+  "claimed_at": "2026-09-24T08:10:00Z",
+  "account": {"email": "alice@example.com", "session_key": "sk-ant-sid01-..."},
+  "export": "alice@example.com----sk-ant-sid01-...",
+  "remaining": 7
+}
+```
+
+- `remaining`：同样条件下还剩多少个可获取的账号。
+- `export` 仅在 `format` 不是 `json` 时出现。
+- `404`：没有可获取的账号（`{"detail": "没有可获取的账号"}`），可先触发注册再重试。
+- `400`：`fields` / `format` / `sep` / `check_status` 不合法。
+- 管理员可在面板账号列表里看到「已获取」标签，并手动取消标记让账号重新可被获取。
+
+示例：
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" \
+  "$BASE/accounts/claim?format=line&fields=email,session_key" | jq -r .export
 ```
 
 ### GET /api/v1/fields
@@ -206,7 +250,7 @@ curl -H "Authorization: Bearer $KEY" \
 | `400` | 参数或请求体不合法（含未知字段、未知格式、代理不存在） |
 | `401` | 缺少或错误的 API Key |
 | `403` | 服务未启用开放 API |
-| `404` | 注册任务不存在 |
+| `404` | 注册任务不存在；或没有可获取的账号（`accounts/claim`） |
 | `409` | 已有注册任务在运行（响应带 `active_run_id`） |
 | `422` | Query 参数类型或范围错误（如 `wait` 超过 {{MAX_WAIT}}） |
 

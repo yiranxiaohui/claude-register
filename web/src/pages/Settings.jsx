@@ -175,9 +175,13 @@ function ApiUsage() {
     `curl -H "Authorization: Bearer $KEY" \\`,
     `  "${base}/register/12?wait=50&fields=email,session_key,password"`,
     ``,
-    `# 3. 批量导出（format: text/json/csv/line；可按 status/check_status/emails 过滤）`,
+    `# 3. 批量导出（format: text/json/csv/line；可按 status/check_status/claimed/emails 过滤）`,
     `curl -H "Authorization: Bearer $KEY" \\`,
     `  "${base}/accounts/export?format=line&fields=email,session_key&status=success"`,
+    ``,
+    `# 4. 获取一个账号（每次一个，自动标记为「已获取」，不会重复发放；没有可用账号返回 404）`,
+    `curl -X POST -H "Authorization: Bearer $KEY" \\`,
+    `  "${base}/accounts/claim?fields=email,session_key,password"`,
   ].join("\n");
   return (
     <details className="text-sm">

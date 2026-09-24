@@ -211,6 +211,19 @@ export default function Accounts({ attach, running, navigate }) {
     }
   };
 
+  const toggleClaimed = async (a) => {
+    const claimed = !a.claimed_at;
+    try {
+      const row = await api.setAccountClaimed(a.email, claimed);
+      setAccounts((list) =>
+        list.map((x) => (x.email === a.email ? { ...x, claimed_at: row.claimed_at } : x)),
+      );
+      toast.success(claimed ? "已标记为已获取" : "已取消「已获取」标记");
+    } catch (e) {
+      toast.error(`操作失败（${e.status || "?"}）`);
+    }
+  };
+
   const confirmDelete = async () => {
     const email = deleteTarget;
     setDeleteTarget("");
@@ -293,6 +306,15 @@ export default function Accounts({ attach, running, navigate }) {
                           checkedAt={a.checked_at}
                           detail={a.check_detail}
                         />
+                        {a.claimed_at ? (
+                          <Badge
+                            className="rounded-full border-transparent bg-violet-500/15 text-violet-400"
+                            title={`获取时间：${a.claimed_at}`}
+                          >
+                            已获取
+                            <span className="ml-1 font-normal opacity-70">· {relTime(a.claimed_at)}</span>
+                          </Badge>
+                        ) : null}
                         {a.display_name ? <span>{a.display_name}</span> : null}
                         {a.session_key ? (
                           <span className="font-mono">
@@ -379,6 +401,9 @@ export default function Accounts({ attach, running, navigate }) {
                           取消
                         </Button>
                         <span className="flex-1" />
+                        <Button variant="outline" size="sm" onClick={() => toggleClaimed(a)}>
+                          {a.claimed_at ? "取消已获取" : "标记已获取"}
+                        </Button>
                         <Button
                           variant="destructive"
                           size="sm"

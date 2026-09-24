@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 _SCHEMA = """
@@ -15,7 +16,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   mailbox_id TEXT, last_run_id INTEGER, status TEXT,
   password TEXT, session_key TEXT, proxy TEXT, display_name TEXT,
   mail_key TEXT, mail_base_url TEXT,
-  check_status TEXT, checked_at TEXT
+  check_status TEXT, checked_at TEXT, claimed_at TEXT
 );
 """
 
@@ -28,11 +29,12 @@ _ACCOUNT_EXTRA_COLS = (
     ("mail_base_url", "TEXT"),
     ("check_status", "TEXT"),
     ("checked_at", "TEXT"),
+    ("claimed_at", "TEXT"),
 )
 
 
 def _migrate_accounts(conn: sqlite3.Connection) -> None:
-    """旧库补列：password / session_key / proxy / display_name / mail_key / mail_base_url。"""
+    """旧库补列：_ACCOUNT_EXTRA_COLS 里缺的列一律 ALTER TABLE 补上。"""
     existing = {
         str(row[1])
         for row in conn.execute("PRAGMA table_info(accounts)").fetchall()
@@ -172,6 +174,63 @@ def update_account_check(conn, email, status, checked_at) -> bool:
         "UPDATE accounts SET check_status=?, checked_at=? WHERE email=?",
         (status, checked_at, email),
     )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# 已知不可用的检测结果：领取时默认跳过
+UNUSABLE_CHECK_STATUSES = ("dead", "blocked")
+_claim_lock = threading.Lock()
+
+
+def _claimable_where(check_status: str | None) -> tuple[str, list]:
+    """可领取：注册成功、有 sessionKey、未获取；check_status 为空时跳过已知失效/被拦截的，
+    指定时只取该检测结果的账号。"""
+    where = ["status='success'", "COALESCE(session_key,'')<>''",
+             "COALESCE(claimed_at,'')=''"]
+    params: list = []
+    if check_status:
+        where.append("check_status=?")
+        params.append(check_status)
+    else:
+        where.append(
+            "COALESCE(check_status,'') NOT IN ("
+            + ",".join("?" * len(UNUSABLE_CHECK_STATUSES)) + ")"
+        )
+        params.extend(UNUSABLE_CHECK_STATUSES)
+    return " AND ".join(where), params
+
+
+def count_claimable(conn, *, check_status: str | None = None) -> int:
+    where, params = _claimable_where(check_status)
+    return conn.execute(f"SELECT COUNT(*) FROM accounts WHERE {where}", params).fetchone()[0]
+
+
+def claim_account(conn, now, *, check_status: str | None = None) -> dict | None:
+    """领取一个可领取的账号并打上「已获取」标记（claimed_at），没有返回 None。
+
+    按入库顺序先进先出；加锁 + 条件 UPDATE，并发调用不会把同一个账号发给两个调用方。
+    """
+    where, params = _claimable_where(check_status)
+    sql = f"SELECT rowid, email FROM accounts WHERE {where} ORDER BY rowid ASC LIMIT 1"
+    with _claim_lock:
+        row = conn.execute(sql, params).fetchone()
+        if row is None:
+            return None
+        cur = conn.execute(
+            "UPDATE accounts SET claimed_at=? WHERE rowid=? AND COALESCE(claimed_at,'')=''",
+            (now, row["rowid"]),
+        )
+        conn.commit()
+        if cur.rowcount == 0:  # 理论上不会发生（锁内），保险起见
+            return None
+        return get_account(conn, row["email"])
+
+
+def set_account_claimed(conn, email, claimed_at: str) -> bool:
+    """面板手动标记/取消「已获取」；claimed_at 为空串表示取消。"""
+    cur = conn.execute("UPDATE accounts SET claimed_at=? WHERE email=?",
+                       (claimed_at or "", email))
     conn.commit()
     return cur.rowcount > 0
 

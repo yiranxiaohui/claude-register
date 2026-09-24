@@ -86,6 +86,13 @@ export const api = {
       method: "POST",
     }).then(j),
 
+  setAccountClaimed: (email, claimed) =>
+    fetch(`/api/accounts/${encodeURIComponent(email)}/claimed`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ claimed }),
+    }).then(j),
+
   checkAccount: (email) =>
     fetch(`/api/accounts/${encodeURIComponent(email)}/check`, {
       method: "POST",
