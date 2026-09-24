@@ -70,3 +70,12 @@ def test_takeover_wrapper_reconnects_on_resize_instead_of_xpra_resize():
     assert 'window.addEventListener("resize"' in page
     assert "RESIZE_SETTLE_MS" in page
     assert "viewer.src = viewer.src; // 重连" in page
+
+
+def test_panel_proxy_keeps_host_port_and_outer_proto():
+    """API 文档的 Base URL 与登录 Cookie 的 Secure 依赖这两个头。"""
+    conf = (ROOT / "deploy" / "nginx.conf").read_text(encoding="utf-8")
+    panel = conf[conf.index("        location / {"):]
+    assert "proxy_set_header Host $http_host;" in panel
+    assert "proxy_set_header X-Forwarded-Proto $forwarded_proto;" in panel
+    assert "map $http_x_forwarded_proto $forwarded_proto" in conf

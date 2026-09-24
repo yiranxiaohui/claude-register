@@ -31,7 +31,9 @@ WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     state = AppState(Path(data_dir), Path(config_path), now_fn or default_now)
-    app = FastAPI()
+    # 关掉 FastAPI 全局 /docs、/openapi.json：它们列的是需要面板 Cookie 的内部接口，
+    # 会误导调用方。开放 API 的文档单独提供在 /api/v1/docs(.md) 与 /llms.txt。
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.cr = state
 
     def _has_valid_cookie(request: Request, cfg) -> bool:
