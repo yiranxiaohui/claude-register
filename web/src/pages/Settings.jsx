@@ -140,6 +140,30 @@ function ApiKeyField({ value, onRotated }) {
   );
 }
 
+function ApiDocs() {
+  const origin = window.location.origin;
+  const links = [
+    [`${origin}/api/v1/docs.md`, "接口文档（Markdown，可直接发给 AI）"],
+    [`${origin}/api/v1/docs`, "在线调试（Swagger）"],
+    [`${origin}/api/v1/openapi.json`, "OpenAPI 规范（导入 Postman / Apifox）"],
+    [`${origin}/llms.txt`, "AI 入口（llms.txt）"],
+  ];
+  return (
+    <div className="space-y-1 text-sm">
+      <div className="text-muted-foreground">接口文档（免 Key 访问，可分享给调用方）：</div>
+      <ul className="space-y-0.5">
+        {links.map(([href, label]) => (
+          <li key={href} className="flex flex-wrap gap-x-2">
+            <a className="font-mono text-xs text-primary underline-offset-2 hover:underline break-all"
+              href={href} target="_blank" rel="noopener noreferrer">{href}</a>
+            <span className="text-xs text-muted-foreground">{label}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ApiUsage() {
   const base = `${window.location.origin}/api/v1`;
   const example = [
@@ -160,7 +184,7 @@ function ApiUsage() {
       <summary className="cursor-pointer text-muted-foreground">调用示例</summary>
       <pre className="mt-2 overflow-x-auto rounded-md bg-muted p-3 text-xs leading-5">{example}</pre>
       <p className="mt-1 text-xs text-muted-foreground">
-        可用字段：GET {base}/fields；可选代理：GET {base}/proxies。完整说明见 README「开放 API」。
+        可用字段：GET {base}/fields；可选代理：GET {base}/proxies。
       </p>
     </details>
   );
@@ -265,7 +289,12 @@ export default function Settings({ onPasswordSet }) {
                   </div>
                 ),
               )}
-              {group.title === "开放 API" && <ApiUsage />}
+              {group.title === "开放 API" && (
+                <>
+                  <ApiDocs />
+                  <ApiUsage />
+                </>
+              )}
             </CardContent>
           </Card>
         ))}
