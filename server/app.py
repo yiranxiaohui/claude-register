@@ -401,6 +401,116 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"启动接管失败：{exc}")
         return info
 
+    @app.post("/api/takeover/manual")
+    async def takeover_manual(request: Request, _=Depends(require_auth)):
+        """手动登录：开一个未登录的接管浏览器打开登录页。body: {email?, proxy_id?}。"""
+        cfg = state.config()
+        if not cfg.takeover_enabled:
+            raise HTTPException(status_code=403, detail="接管功能已禁用")
+        try:
+            body = await request.json() if await request.body() else {}
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="请求体必须是对象")
+        email = body.get("email") or ""
+        if not isinstance(email, str):
+            raise HTTPException(status_code=400, detail="email 必须是字符串")
+        email = email.strip().lower()
+        if email and not sk_import.EMAIL_RE.fullmatch(email):
+            raise HTTPException(status_code=400, detail="邮箱格式不正确")
+        proxy_id = body.get("proxy_id") or None
+        if proxy_id is not None and not isinstance(proxy_id, str):
+            raise HTTPException(status_code=400, detail="proxy_id 必须是字符串")
+        proxy = resolve_saved_proxy(cfg, proxy_id) if proxy_id else ""
+        try:
+            info = await asyncio.to_thread(
+                state.takeover.start,
+                email="",
+                session_key="",
+                proxy=proxy,
+                idle_timeout_s=cfg.takeover_idle_timeout_min * 60,
+                mode="manual",
+                login_email=email,
+            )
+        except TakeoverBusy:
+            raise HTTPException(status_code=409, detail="已有接管会话，请先结束")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"启动手动登录失败：{exc}")
+        return {**info, "mode": "manual", "login_email": email}
+
+    capture_lock = asyncio.Lock()
+
+    @app.post("/api/takeover/capture")
+    async def takeover_capture(_=Depends(require_auth)):
+        """读取接管浏览器当前的 sessionKey；是新值且未失效就新建/更新账号。
+
+        面板在接管期间定时调用；sk 未变化、无 Cookie 或已判失效时只返回状态，
+        不重复检测。新值优先用 claude.ai 返回的账号邮箱入库，其次用会话已
+        关联的账号 / 手动登录时填写的邮箱，都没有时用占位标识。
+        """
+        async with capture_lock:
+            ctx = state.takeover.capture_context()
+            if not ctx["running"]:
+                raise HTTPException(status_code=409, detail="当前没有活动的接管会话")
+            try:
+                session_key = await asyncio.to_thread(state.takeover.read_session_key)
+            except TakeoverError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            base = {"found": bool(session_key), "saved": False, "email": ctx["email"]}
+            if not session_key:
+                return base
+            if session_key == ctx["saved_key"]:
+                return {**base, "saved": True, "unchanged": True}
+            if session_key in ctx["rejected_keys"]:
+                return {**base, "check_status": "dead", "repeat": True,
+                        "check_detail": "该 sessionKey 已检测为失效"}
+
+            proxy = ctx["proxy"]
+            check_status, check_detail, found_email = await asyncio.to_thread(
+                probe_session, session_key, proxy or None, want_email=True,
+            )
+            if check_status == "dead":
+                state.takeover.mark_rejected(session_key)
+                return {**base, "check_status": check_status, "check_detail": check_detail}
+
+            email = (
+                (found_email or "").strip().lower()
+                or ctx["email"]
+                or ctx["login_email"]
+                or sk_import.placeholder_email(session_key)
+            )
+            now = state.now_fn()
+            created = db.get_account(state.conn, email) is None
+            if created:
+                db.upsert_account(
+                    state.conn, email, email.split("@", 1)[1], "", "", None, "success",
+                    session_key=session_key, proxy=proxy, created_at=now,
+                )
+            else:
+                fields = {"session_key": session_key}
+                if proxy:
+                    fields["proxy"] = proxy
+                db.update_account_fields(state.conn, email, fields)
+            db.update_account_check(state.conn, email, check_status, now)
+            state.takeover.mark_saved(email=email, session_key=session_key)
+            log(f"已从接管浏览器取得 sessionKey 并{'新建' if created else '更新'}账号：{email}")
+            notes = []
+            login_email = ctx["login_email"]
+            if found_email and login_email and found_email.lower() != login_email:
+                notes.append(f"实际登录的是 {found_email}，与填写的 {login_email} 不同")
+            if not found_email and not ctx["email"] and not login_email:
+                notes.append("未取得邮箱，使用占位标识")
+            return {
+                "found": True,
+                "saved": True,
+                "created": created,
+                "email": email,
+                "check_status": check_status,
+                "check_detail": check_detail,
+                "note": "；".join(notes),
+            }
+
     @app.post("/api/takeover/stop")
     def takeover_stop(_=Depends(require_auth)):
         state.takeover.stop()
@@ -409,8 +519,12 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     @app.post("/api/takeover/relogin")
     async def takeover_relogin(_=Depends(require_auth)):
         info = state.takeover.status()
-        if not info.get("running") or not info.get("email"):
+        if not info.get("running"):
             raise HTTPException(status_code=409, detail="当前没有活动的接管会话")
+        if not info.get("email"):
+            raise HTTPException(
+                status_code=409, detail="手动登录会话尚未取得 sessionKey，无法自动重新登录",
+            )
 
         email = str(info["email"])
         row = db.get_account(state.conn, email)
@@ -518,6 +632,8 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
 
         db.update_account_fields(state.conn, email, {"session_key": session_key})
         db.update_account_check(state.conn, email, check_status, checked_at)
+        # 让自动取 sk 的轮询认得这把新 Key，不再重复检测/入库。
+        state.takeover.mark_saved(email=email, session_key=session_key)
         return {
             "ok": True,
             "email": email,

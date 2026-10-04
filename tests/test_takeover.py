@@ -77,7 +77,8 @@ def test_start_status_stop_sequence():
 
     info = m.start(email="a@x.com", session_key="sk", proxy="", idle_timeout_s=999)
     assert info["email"] == "a@x.com"
-    assert m.status() == {"running": True, "email": "a@x.com", "started_at": "2026-07-30T00:00:00Z"}
+    assert m.status() == {"running": True, "email": "a@x.com",
+                          "started_at": "2026-07-30T00:00:00Z", "mode": "account"}
     argv0 = [p.argv[0] for p in launcher.spawned]
     assert argv0 == ["xpra"]
     xpra_argv = launcher.spawned[0].argv

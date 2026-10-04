@@ -3,7 +3,11 @@
 与注册流程（server/runner.py）平级、各用各的屏：注册走 Camoufox 的 "virtual"
 自选屏，接管用 Xpra start-desktop 管理独立的 :100 虚拟桌面，并直接提供 HTML5
 客户端和 WebSocket 传输。Xpra 客户端支持自动重连和双向系统剪贴板同步。
-单例：同一时刻只允许一个接管会话。Xpra 只绑 localhost，不对外暴露端口，
+单例：同一时刻只允许一个接管会话。
+
+两种模式：``account`` 注入已有账号的 sessionKey 打开已登录页面；``manual``
+不注入 Cookie、直接打开登录页，由用户在接管画面里手动登录任意邮箱，之后
+面板轮询 ``read_session_key`` 把新 Cookie 取出入库。Xpra 只绑 localhost，不对外暴露端口，
 由同容器 Nginx 反代，并通过 FastAPI auth_request 复用面板鉴权。
 """
 from __future__ import annotations
@@ -69,6 +73,11 @@ class TakeoverManager:
         self._active = False
         self._email = None
         self._started_at = None
+        self._mode = None
+        self._proxy = ""
+        self._login_email = ""
+        self._saved_key = ""
+        self._rejected_keys: set[str] = set()
         self._xpra = None
         self._browser = None
         self._browser_executor = None
@@ -83,9 +92,24 @@ class TakeoverManager:
                 "running": self._active,
                 "email": self._email,
                 "started_at": self._started_at,
+                "mode": self._mode,
             }
 
-    def start(self, *, email, session_key, proxy="", idle_timeout_s=900) -> dict:
+    def capture_context(self) -> dict:
+        """供面板取 sk 时使用的内部上下文（含代理，切勿原样返回给前端）。"""
+        with self._lock:
+            return {
+                "running": self._active,
+                "mode": self._mode,
+                "email": self._email,
+                "login_email": self._login_email,
+                "proxy": self._proxy,
+                "saved_key": self._saved_key,
+                "rejected_keys": set(self._rejected_keys),
+            }
+
+    def start(self, *, email, session_key, proxy="", idle_timeout_s=900,
+              mode="account", login_email="") -> dict:
         with self._lock:
             if self._active:
                 raise TakeoverBusy("已有接管会话，请先结束")
@@ -134,6 +158,7 @@ class TakeoverManager:
                     session_key=session_key,
                     proxy=proxy,
                     display=self.display,
+                    login_email=login_email,
                 ).result()
                 # 桌面没有窗口管理器：由它把浏览器窗口持续铺满 Xpra 桌面，
                 # 否则固定 1280x900 的窗口在宽屏右侧留黑、在矮视窗底部被裁掉。
@@ -143,9 +168,17 @@ class TakeoverManager:
                 self._teardown()
                 raise TakeoverError(f"启动接管会话失败：{exc}") from exc
             self._active = True
-            self._email = email
+            self._email = email or None
             self._started_at = self.now_fn()
-            console.log(f"接管会话已启动：{email}")
+            self._mode = mode
+            self._proxy = proxy or ""
+            self._login_email = login_email or ""
+            self._saved_key = session_key or ""
+            self._rejected_keys = set()
+            console.log(
+                f"接管会话已启动：{email}" if mode == "account"
+                else f"手动登录会话已启动：{login_email or '（未指定邮箱）'}"
+            )
             self._idle_timeout_s = float(idle_timeout_s)
             self._arm_idle_timer_locked()
             return {"email": email, "started_at": self._started_at}
@@ -184,6 +217,33 @@ class TakeoverManager:
                 console.log(f"接管浏览器重新登录失败：{exc}")
                 raise TakeoverError(str(exc)) from exc
 
+    def read_session_key(self) -> str:
+        """在接管浏览器所属线程读取当前 sessionKey Cookie；没有则返回空串。"""
+        with self._lock:
+            if not self._active or self._browser is None or self._browser_executor is None:
+                raise TakeoverError("当前没有活动的接管会话")
+            reader = getattr(self._browser, "session_key", None)
+            if not callable(reader):
+                raise TakeoverError("当前接管浏览器不支持读取 sessionKey")
+            try:
+                return self._browser_executor.submit(reader).result() or ""
+            except Exception as exc:  # noqa: BLE001
+                raise TakeoverError(f"读取 sessionKey 失败：{exc}") from exc
+
+    def mark_saved(self, *, email: str, session_key: str) -> None:
+        """记录已入库的 sk，并把会话归属切到对应账号（之后可「重新自动登录」）。"""
+        with self._lock:
+            if not self._active:
+                return
+            self._email = email
+            self._saved_key = session_key
+
+    def mark_rejected(self, session_key: str) -> None:
+        """记下检测为失效的 sk，轮询时不再重复检测同一个值。"""
+        with self._lock:
+            if self._active:
+                self._rejected_keys.add(session_key)
+
     def _idle_stop(self, generation: int):
         with self._lock:
             # cancel() 与回调启动可能竞争；旧一代计时器不得关闭
@@ -203,6 +263,11 @@ class TakeoverManager:
             self._active = False
             self._email = None
             self._started_at = None
+            self._mode = None
+            self._proxy = ""
+            self._login_email = ""
+            self._saved_key = ""
+            self._rejected_keys = set()
             self._idle_timeout_s = 0.0
 
     def _teardown(self):

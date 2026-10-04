@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Download, Upload } from "lucide-react";
+import { Download, LogIn, Upload } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/status-badge";
 import { ExportDialog } from "@/components/export-dialog";
 import { ImportDialog } from "@/components/import-dialog";
+import { ManualLoginDialog } from "@/components/manual-login-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -72,6 +73,9 @@ export default function Accounts({ attach, running, navigate }) {
   const [checking, setChecking] = useState("");
   const [exportOpen, setExportOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const busyRef = useRef(false);
   const [copiedEmail, setCopiedEmail] = useState("");
   const [editingEmail, setEditingEmail] = useState("");
   const [editForm, setEditForm] = useState({});
@@ -85,6 +89,59 @@ export default function Accounts({ attach, running, navigate }) {
   useEffect(() => {
     refreshLists();
   }, []);
+
+  // 读取接管浏览器里的 sessionKey；新值会由后端检测后新建/更新账号。
+  // manual=true 时是用户点按钮，结果都要提示；轮询时只在有新进展时提示。
+  async function captureOnce(manual) {
+    const res = await api.takeoverCapture();
+    if (res.saved && !res.unchanged) {
+      const tail = res.check_status === "alive" ? "" : "（存活检测暂时失败）";
+      toast.success(
+        `${res.created ? "已新建账号" : "已更新 sessionKey"}：${res.email}${tail}`,
+        res.note ? { description: res.note } : undefined,
+      );
+      refreshLists();
+    } else if (res.check_status === "dead" && (manual || !res.repeat)) {
+      toast.error(`取到的 sessionKey 已失效：${res.check_detail || ""}`);
+    } else if (manual) {
+      if (!res.found) toast.error("浏览器里还没有 sessionKey，请先在接管画面完成登录");
+      else toast.success(`sessionKey 未变化，已保存在 ${res.email}`);
+    }
+    return res;
+  }
+
+  // 接管期间每 5 秒自动取一次 sk：手动登录成功后无需任何操作即可入库。
+  useEffect(() => {
+    if (!takeover.running) return undefined;
+    let inflight = false;
+    const timer = setInterval(async () => {
+      if (inflight || busyRef.current) return;
+      inflight = true;
+      try {
+        await captureOnce(false);
+      } catch (e) {
+        if (e.status === 409) {
+          api.takeoverStatus().then(setTakeover).catch(() => {});
+        }
+      } finally {
+        inflight = false;
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [takeover.running]);
+
+  const captureNow = async () => {
+    busyRef.current = true;
+    setCapturing(true);
+    try {
+      await captureOnce(true);
+    } catch (e) {
+      toast.error(e.body?.detail || `提取失败（${e.status || "?"}）`);
+    } finally {
+      busyRef.current = false;
+      setCapturing(false);
+    }
+  };
 
   async function doRerun(acctEmail) {
     try {
@@ -160,15 +217,21 @@ export default function Accounts({ attach, running, navigate }) {
   };
 
   const stopTakeover = async () => {
+    busyRef.current = true;
     try {
+      // 结束前最后取一次，避免刚登录完还没轮询到就把浏览器关了。
+      await captureOnce(false).catch(() => {});
       await api.takeoverStop();
       setTakeover({ running: false, email: null });
     } catch {
       /* ignore */
+    } finally {
+      busyRef.current = false;
     }
   };
 
   const reloginTakeover = async () => {
+    busyRef.current = true;
     setRelogging(true);
     try {
       const res = await api.takeoverRelogin();
@@ -188,6 +251,7 @@ export default function Accounts({ attach, running, navigate }) {
             : detail || `重新登录失败（${e.status || "?"}）`,
       );
     } finally {
+      busyRef.current = false;
       setRelogging(false);
     }
   };
@@ -245,6 +309,15 @@ export default function Accounts({ attach, running, navigate }) {
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle>账号列表</CardTitle>
           <span className="flex gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setManualOpen(true)}
+              disabled={takeover.running}
+              title={takeover.running ? "已有接管会话，请先结束" : ""}
+            >
+              <LogIn /> 手动登录…
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
               <Upload /> 导入 SK…
             </Button>
@@ -259,7 +332,11 @@ export default function Accounts({ attach, running, navigate }) {
           {takeover.running && (
             <Alert className="border-blue-500/30 bg-blue-500/10">
               <AlertDescription className="flex w-full items-center justify-between gap-2 text-blue-400">
-                <span>正在接管：{takeover.email}</span>
+                <span className="min-w-0">
+                  {takeover.mode === "manual" && !takeover.email
+                    ? "手动登录中：在接管画面完成登录后，会自动提取 sessionKey 并新建账号"
+                    : `正在接管：${takeover.email}`}
+                </span>
                 <span className="flex items-center gap-2">
                   <Button variant="outline" size="sm" asChild>
                     <a
@@ -273,11 +350,21 @@ export default function Accounts({ attach, running, navigate }) {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={reloginTakeover}
-                    disabled={relogging}
+                    onClick={captureNow}
+                    disabled={relogging || capturing}
                   >
-                    {relogging ? "重新登录中…" : "重新自动登录"}
+                    {capturing ? "提取中…" : "提取 sk"}
                   </Button>
+                  {takeover.email && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={reloginTakeover}
+                      disabled={relogging || capturing}
+                    >
+                      {relogging ? "重新登录中…" : "重新自动登录"}
+                    </Button>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
@@ -449,6 +536,11 @@ export default function Accounts({ attach, running, navigate }) {
         </AlertDialogContent>
       </AlertDialog>
       <ExportDialog open={exportOpen} onOpenChange={setExportOpen} />
+      <ManualLoginDialog
+        open={manualOpen}
+        onOpenChange={setManualOpen}
+        onStarted={() => api.takeoverStatus().then(setTakeover).catch(() => {})}
+      />
       <ImportDialog open={importOpen} onOpenChange={setImportOpen} onImported={refreshLists} />
     </>
   );
