@@ -11,7 +11,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -380,8 +379,7 @@ export default function Accounts({ attach, running, navigate }) {
           {accounts.length === 0 ? (
             <div className="text-sm text-muted-foreground">暂无账号</div>
           ) : (
-            <ScrollArea className="[&>[data-slot=scroll-area-viewport]]:max-h-[560px]">
-              <ul className="flex flex-col gap-1.5 pr-3">
+            <ul className="flex flex-col gap-1.5">
               {accounts.map((a) => (
                 <li key={a.email} className="flex flex-col">
                   <div
@@ -510,8 +508,7 @@ export default function Accounts({ attach, running, navigate }) {
                   )}
                 </li>
               ))}
-              </ul>
-            </ScrollArea>
+            </ul>
           )}
         </CardContent>
       </Card>
