@@ -10,6 +10,7 @@ from claude_register.browser import mask_proxy, needs_relay, normalize_proxy_url
 from claude_register.socks_relay import SocksRelay
 
 ORG_URL = "https://claude.ai/api/organizations"
+ACCOUNT_URL = "https://claude.ai/api/account"
 # 不自带 User-Agent：UA 由 impersonate 按所模拟的浏览器给出，手写一个会跟
 # TLS/HTTP2 指纹对不上，反而更像机器人。
 _HEADERS = {
@@ -111,6 +112,25 @@ def _looks_like_org_payload(resp) -> bool:
     return False
 
 
+def _account_email(resp) -> str:
+    """从 /api/account 响应里取邮箱；拿不到返回空串。"""
+    if resp.status_code != 200 or _looks_like_shield(resp):
+        return ""
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return ""
+    if isinstance(payload, dict) and isinstance(payload.get("account"), dict):
+        payload = payload["account"]
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("email_address", "email"):
+        value = payload.get(key)
+        if isinstance(value, str) and "@" in value:
+            return value.strip().lower()
+    return ""
+
+
 def check_session(
     session_key: str,
     proxy: str | None = None,
@@ -118,20 +138,40 @@ def check_session(
     timeout: float = 15.0,
     client_factory=None,
 ) -> tuple[str, str]:
+    status, detail, _ = probe_session(
+        session_key, proxy, timeout=timeout, client_factory=client_factory,
+    )
+    return status, detail
+
+
+def probe_session(
+    session_key: str,
+    proxy: str | None = None,
+    *,
+    want_email: bool = False,
+    timeout: float = 15.0,
+    client_factory=None,
+) -> tuple[str, str, str]:
+    """检测 sessionKey，返回 (状态, 说明, 邮箱)。
+
+    want_email=True 且检测为 alive 时，用同一个客户端（同一条代理/中继）再请求
+    /api/account 取账号邮箱；取不到邮箱不影响状态判定，邮箱返回空串。
+    """
     if not session_key:
-        return ("error", "无 sessionKey")
+        return ("error", "无 sessionKey", "")
     try:
         proxy_url = normalize_proxy_url(proxy)
     except Exception:  # noqa: BLE001
-        return ("error", f"代理无效：{mask_proxy(proxy or '')}")
+        return ("error", f"代理无效：{mask_proxy(proxy or '')}", "")
 
     factory = client_factory or _default_client
     try:
         client = factory(proxy_url)
     except Exception as exc:  # noqa: BLE001
         # socks5 缺 socksio 会在建 client 时报错
-        return ("error", f"发起请求失败：{exc}")
+        return ("error", f"发起请求失败：{exc}", "")
 
+    email = ""
     try:
         with client:
             resp = client.get(
@@ -140,9 +180,23 @@ def check_session(
                 cookies={"sessionKey": session_key},
                 timeout=timeout,
             )
+            status, detail = _classify(resp)
+            if want_email and status == "alive":
+                try:
+                    email = _account_email(client.get(
+                        ACCOUNT_URL,
+                        headers=_HEADERS,
+                        cookies={"sessionKey": session_key},
+                        timeout=timeout,
+                    ))
+                except Exception:  # noqa: BLE001
+                    email = ""
     except Exception as exc:  # noqa: BLE001
-        return ("error", f"请求失败：{type(exc).__name__}")
+        return ("error", f"请求失败：{type(exc).__name__}", "")
+    return status, detail, email
 
+
+def _classify(resp) -> tuple[str, str]:
     if resp.status_code == 200 and not _looks_like_shield(resp):
         if _looks_like_org_payload(resp):
             return ("alive", "有效")

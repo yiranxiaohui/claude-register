@@ -54,6 +54,13 @@ export const api = {
 
   listAccounts: () => fetch("/api/accounts").then(j),
 
+  importAccounts: (body) =>
+    fetch("/api/accounts/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(j),
+
   exportAccountsText: (params) =>
     fetch(`/api/accounts/export${params ? `?${new URLSearchParams(params)}` : ""}`).then((r) => {
       if (!r.ok) {

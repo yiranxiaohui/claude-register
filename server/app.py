@@ -18,9 +18,9 @@ from claude_register.accounts import AccountRecord
 from claude_register.anymail import AnyMailAccessError, AnyMailClient
 from claude_register.console import log
 from claude_register.proxy_pool import ProxyPool, XuiNode
-from claude_register.session_check import check_session
+from claude_register.session_check import check_session, probe_session
 from claude_register.xui import XuiClient
-from server import auth, db, export, open_api
+from server import auth, db, export, open_api, sk_import
 from server.config_store import save_config, to_dict
 from server.deps import AppState, default_now
 from server.runner import RunnerBusy
@@ -149,6 +149,18 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
             raise HTTPException(status_code=409, detail="已有任务在运行")
         return {"run_id": rid}
 
+    def resolve_saved_proxy(cfg, proxy_id) -> str:
+        """按 id 取代理池里的代理地址；不存在/无效抛 400。"""
+        selected = next((p for p in cfg.saved_proxies if p["id"] == proxy_id), None)
+        if selected is None:
+            raise HTTPException(status_code=400, detail="所选代理不存在，请刷新代理列表")
+        from claude_register.browser import validate_proxy
+        try:
+            validate_proxy(selected["url"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="所选代理地址无效，请编辑后重试") from None
+        return selected["url"]
+
     def start_registration(body: dict) -> int:
         """面板与开放 API 共用的注册入口：解析所选代理并启动 Runner。
 
@@ -157,15 +169,8 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         cfg = state.config()
         proxy_id = body.get("proxy_id")
         if proxy_id is not None:
-            selected = next((p for p in cfg.saved_proxies if p["id"] == proxy_id), None)
-            if selected is None:
-                raise HTTPException(status_code=400, detail="所选代理不存在，请刷新代理列表")
-            from claude_register.browser import validate_proxy
-            try:
-                validate_proxy(selected["url"])
-            except ValueError:
-                raise HTTPException(status_code=400, detail="所选代理地址无效，请编辑后重试") from None
-            cfg = replace(cfg, register_proxy=selected["url"], xui_enabled=False)
+            url = resolve_saved_proxy(cfg, proxy_id)
+            cfg = replace(cfg, register_proxy=url, xui_enabled=False)
         return state.runner.start(
             cfg,
             email=body.get("email"),
@@ -290,6 +295,33 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         key = "cr_" + secrets.token_urlsafe(32)
         save_config(state.config_path, {"api_key": key})
         return {"api_key": key}
+
+    @app.post("/api/accounts/import")
+    async def accounts_import(request: Request, _=Depends(require_auth)):
+        """批量导入 sessionKey。body: {text, proxy_id?, check?=true, skip_dead?=true}。"""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+        if not isinstance(body, dict) or not isinstance(body.get("text"), str):
+            raise HTTPException(status_code=400, detail="text 必须是字符串")
+        proxy_id = body.get("proxy_id") or None
+        if proxy_id is not None and not isinstance(proxy_id, str):
+            raise HTTPException(status_code=400, detail="proxy_id 必须是字符串")
+        proxy = resolve_saved_proxy(state.config(), proxy_id) if proxy_id else ""
+        check = body.get("check", True) is not False
+        skip_dead = body.get("skip_dead", True) is not False
+
+        def probe(sk, px, want_email):
+            return probe_session(sk, px or None, want_email=want_email)
+
+        try:
+            return await asyncio.to_thread(
+                sk_import.run_import, state.conn, body["text"], proxy=proxy,
+                check=check, skip_dead=skip_dead, now=state.now_fn(), probe=probe,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
     @app.patch("/api/accounts/{email}")
     async def account_update(email: str, request: Request, _=Depends(require_auth)):
