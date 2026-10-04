@@ -12,7 +12,9 @@ from camoufox.sync_api import Camoufox
 
 from claude_register.anymail import AnyMailClient
 from claude_register.browser import (
+    URL as LOGIN_URL,
     build_camoufox_kwargs,
+    extract_session_key,
     fill_code,
     fill_email,
     hcaptcha_visible,
@@ -146,6 +148,10 @@ class _BrowserHandle:
         log(f"接管浏览器已为 {email} 重新登录并取得新 sessionKey。")
         return session_key
 
+    def session_key(self) -> str:
+        """读取接管浏览器当前的 sessionKey Cookie（手动登录后取 sk 用）。"""
+        return extract_session_key(self._page) or ""
+
     def close(self):
         try:
             self._cm.__exit__(None, None, None)
@@ -154,8 +160,24 @@ class _BrowserHandle:
                 self._relay.stop()
 
 
-def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = ":100"):
-    """开一个已登录 claude.ai 的 Camoufox（挂在指定 X display 上），返回带 .close() 的句柄。"""
+def _prefill_login_email(page, email: str) -> None:
+    """尽力把邮箱预填进登录框（不点继续），失败只记日志，由用户自己输入。"""
+    try:
+        box = page.get_by_placeholder("Enter your email")
+        box.wait_for(state="visible", timeout=20_000)
+        box.fill(email)
+        log(f"已在登录页预填邮箱：{email}，请在接管画面继续登录。")
+    except Exception as exc:  # noqa: BLE001
+        log(f"预填登录邮箱失败（{exc}），请在接管画面手动输入。")
+
+
+def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = ":100",
+                          login_email: str = ""):
+    """开一个 claude.ai 的 Camoufox（挂在指定 X display 上），返回带 .close() 的句柄。
+
+    有 session_key 时注入 Cookie 打开已登录首页；为空时是「手动登录」模式：
+    直接打开登录页（可选预填邮箱），由用户在接管画面里完成登录。
+    """
     kwargs, relay, geoip = build_camoufox_kwargs(
         proxy or None, max_upstream=takeover_max_upstream()
     )
@@ -178,6 +200,13 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
         ) from exc
     try:
         context = browser.new_context(no_viewport=True)
+        if not session_key:
+            page = context.new_page()
+            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
+            log("手动登录浏览器已打开 claude.ai 登录页。")
+            if login_email:
+                _prefill_login_email(page, login_email)
+            return _BrowserHandle(cm, relay, page)
         context.add_cookies([{
             "name": "sessionKey",
             "value": session_key,

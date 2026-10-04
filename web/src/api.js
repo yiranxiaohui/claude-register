@@ -122,6 +122,16 @@ export const api = {
       body: JSON.stringify({ email }),
     }).then(j),
 
+  takeoverManual: (body) =>
+    fetch("/api/takeover/manual", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(j),
+
+  takeoverCapture: () =>
+    fetch("/api/takeover/capture", { method: "POST" }).then(j),
+
   takeoverStop: () =>
     fetch("/api/takeover/stop", { method: "POST" }).then(j),
 

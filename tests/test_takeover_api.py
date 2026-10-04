@@ -34,6 +34,8 @@ def _client(tmp_path, monkeypatch):
             if not self._running:
                 raise TakeoverError("当前没有活动的接管会话")
             self.touches += 1
+        def mark_saved(self, *, email, session_key):
+            self._email = email
         def relogin(self, **kwargs):
             from server.takeover import TakeoverError
             self.relogin_calls.append(kwargs)

@@ -92,3 +92,11 @@ def test_browser_handle_relogin_reports_missing_new_session(monkeypatch):
             mail_api_key="ak_child",
             login_timeout=120,
         )
+
+
+def test_browser_handle_session_key_reads_current_cookie(monkeypatch):
+    page = _Page()
+    monkeypatch.setattr(takeover_browser, "extract_session_key", lambda p: "sk-cookie")
+    assert takeover_browser._BrowserHandle(None, None, page).session_key() == "sk-cookie"
+    monkeypatch.setattr(takeover_browser, "extract_session_key", lambda p: None)
+    assert takeover_browser._BrowserHandle(None, None, page).session_key() == ""
