@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Download } from "lucide-react";
+import { Download, Upload } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/status-badge";
 import { ExportDialog } from "@/components/export-dialog";
+import { ImportDialog } from "@/components/import-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -70,6 +71,7 @@ export default function Accounts({ attach, running, navigate }) {
   const [relogging, setRelogging] = useState(false);
   const [checking, setChecking] = useState("");
   const [exportOpen, setExportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [copiedEmail, setCopiedEmail] = useState("");
   const [editingEmail, setEditingEmail] = useState("");
   const [editForm, setEditForm] = useState({});
@@ -242,11 +244,16 @@ export default function Accounts({ attach, running, navigate }) {
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle>账号列表</CardTitle>
-          {accounts.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => setExportOpen(true)}>
-              <Download /> 导出…
+          <span className="flex gap-1.5">
+            <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+              <Upload /> 导入 SK…
             </Button>
-          )}
+            {accounts.length > 0 && (
+              <Button variant="outline" size="sm" onClick={() => setExportOpen(true)}>
+                <Download /> 导出…
+              </Button>
+            )}
+          </span>
         </CardHeader>
         <CardContent className="space-y-3">
           {takeover.running && (
@@ -442,6 +449,7 @@ export default function Accounts({ attach, running, navigate }) {
         </AlertDialogContent>
       </AlertDialog>
       <ExportDialog open={exportOpen} onOpenChange={setExportOpen} />
+      <ImportDialog open={importOpen} onOpenChange={setImportOpen} onImported={refreshLists} />
     </>
   );
 }
