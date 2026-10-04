@@ -70,7 +70,11 @@ COPY deploy/supervisord.conf /etc/supervisor/conf.d/claude-register.conf
 RUN nginx -t
 RUN uv sync --frozen --no-dev
 COPY --from=web /web/dist ./web/dist
-RUN uv run camoufox fetch
+# 浏览器版本固定（见 deploy/fetch_camoufox.py）：直接 `camoufox fetch` 会装上
+# 与锁定 Python 包不兼容的最新版，导致浏览器启动失败。
+ARG CAMOUFOX_VERSION=152.0.4-beta.30
+COPY deploy/fetch_camoufox.py /tmp/fetch_camoufox.py
+RUN CAMOUFOX_VERSION=$CAMOUFOX_VERSION uv run python /tmp/fetch_camoufox.py && rm /tmp/fetch_camoufox.py
 ENV CLAUDE_REGISTER_INTERNAL_PORT=8791
 EXPOSE 8790
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/claude-register.conf"]
