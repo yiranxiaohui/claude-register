@@ -57,8 +57,8 @@ def test_socks5h_normalized_to_socks5():
     "socks://h:1080",
 ])
 def test_unknown_scheme_raises(bad):
-    """Playwright 的 toJugglerProxyOptions 对不认识的 scheme 会静默降级成 http 代理，
-    然后浏览器拿 HTTP CONNECT 去捅一个非 HTTP 端口，卡到 NS_ERROR_NET_TIMEOUT。
+    """浏览器对不认识的 scheme 会当成 http 代理（或直接报错），
+    然后拿 HTTP CONNECT 去捅一个非 HTTP 端口，卡到导航超时。
     与其让它烂在 60 秒超时里，不如在这里就明确拒绝。"""
     with pytest.raises(ValueError):
         parse_proxy(bad)
@@ -139,7 +139,7 @@ def test_socks4_with_credentials_rejected(url):
         parse_proxy(url)
 
 
-def test_relay_errors_from_other_threads_reach_the_log_sink(monkeypatch):
+def test_relay_errors_from_other_threads_reach_the_log_sink(monkeypatch, fake_chromium):
     """中继的报错发生在它自己的线程里，也必须落进当前的日志 sink。
 
     console 的 sink 是 ContextVar，新线程起来时上下文是空的——不处理的话，
@@ -168,7 +168,6 @@ def test_relay_errors_from_other_threads_reach_the_log_sink(monkeypatch):
             pass
 
     monkeypatch.setattr(browser, "SocksRelay", Recording)
-    monkeypatch.setattr(browser, "Camoufox", _fake_camoufox({}))
 
     token = console.set_sink(captured.append)
     try:
@@ -202,7 +201,7 @@ def test_proxy_errors_do_not_leak_credentials(bad):
     assert "s3cret" not in str(exc.value), f"报错泄露了密码：{exc.value}"
 
 
-def test_relay_errors_from_concurrent_threads_all_reach_sink(monkeypatch):
+def test_relay_errors_from_concurrent_threads_all_reach_sink(monkeypatch, fake_chromium):
     """多个 handler 线程同时报错时，每一条都要进 sink。
 
     contextvars.Context 不可重入——同一个 Context 对象被两个线程同时 run 会抛
@@ -247,7 +246,6 @@ def test_relay_errors_from_concurrent_threads_all_reach_sink(monkeypatch):
             captured.append(msg)
 
     monkeypatch.setattr(browser, "SocksRelay", Recording)
-    monkeypatch.setattr(browser, "Camoufox", _fake_camoufox({}))
 
     failures = []
 
@@ -281,7 +279,7 @@ def test_socks4_without_credentials_still_ok():
     assert parse_proxy("socks4://h:1080") == {"server": "socks4://h:1080"}
 
 
-def test_relay_gets_normalized_url_not_raw_string(monkeypatch):
+def test_relay_gets_normalized_url_not_raw_string(monkeypatch, fake_chromium):
     """传给中继的是归一化后的地址，不是配置里的原始字符串。
 
     原始串可能带首尾空白、或者用 socks5h:// 这种 scheme。parse_proxy 都处理掉了，
@@ -289,7 +287,6 @@ def test_relay_gets_normalized_url_not_raw_string(monkeypatch):
     """
     seen = {}
     monkeypatch.setattr(browser, "SocksRelay", _fake_relay("203.0.113.9"))
-    monkeypatch.setattr(browser, "Camoufox", _fake_camoufox({}))
 
     class Recording:
         def __init__(self, upstream_url, **kwargs):
@@ -332,8 +329,8 @@ def test_no_relay_without_proxy():
     assert browser.needs_relay(None) is False
 
 
-def test_socks5_auth_launches_relay_and_passes_local_url(monkeypatch):
-    """带认证的 socks5：传给 Camoufox 的必须是中继的免认证本地地址，
+def test_socks5_auth_launches_relay_and_passes_local_url(monkeypatch, fake_chromium):
+    """带认证的 socks5：传给 Chromium 的必须是中继的免认证本地地址，
     而不是原始带凭据的地址——后者会让浏览器直接抛 authentication 报错。"""
     seen = {}
 
@@ -341,7 +338,6 @@ def test_socks5_auth_launches_relay_and_passes_local_url(monkeypatch):
         def __init__(self, upstream_url, **kwargs):
             seen["upstream"] = upstream_url
             self.local_url = "socks5://127.0.0.1:51234"
-            self.stopped = False
 
         def start(self):
             return self
@@ -350,33 +346,22 @@ def test_socks5_auth_launches_relay_and_passes_local_url(monkeypatch):
             return "203.0.113.9"
 
         def stop(self):
-            self.stopped = True
             seen["stopped"] = True
 
-    class FakeCamoufox:
-        def __init__(self, **kwargs):
-            seen["kwargs"] = kwargs
-
-        def __enter__(self):
-            return "BROWSER"
-
-        def __exit__(self, *exc):
-            return None
-
     monkeypatch.setattr(browser, "SocksRelay", FakeRelay)
-    monkeypatch.setattr(browser, "Camoufox", FakeCamoufox)
 
     with browser.browser_session(proxy="socks5://alice:s3cret@up.example:1080") as b:
         assert b == "BROWSER"
 
     assert seen["upstream"] == "socks5://alice:s3cret@up.example:1080"
-    assert seen["kwargs"]["proxy"] == {"server": "socks5://127.0.0.1:51234"}
-    assert "username" not in seen["kwargs"]["proxy"], "凭据不能再传给浏览器"
+    assert fake_chromium["proxy"] == {"server": "socks5://127.0.0.1:51234"}
+    assert "username" not in fake_chromium["proxy"], "凭据不能再传给浏览器"
     assert seen["stopped"] is True, "退出后必须关掉中继，否则端口泄漏"
+    assert fake_chromium["session"].closed, "退出后必须关掉浏览器"
 
 
-def test_relay_stopped_even_if_body_raises(monkeypatch):
-    """调用方 body 抛异常也不能漏掉中继的关闭。"""
+def test_relay_stopped_even_if_body_raises(monkeypatch, fake_chromium):
+    """调用方 body 抛异常也不能漏掉中继和浏览器的关闭。"""
     stopped = []
 
     class FakeRelay:
@@ -392,24 +377,14 @@ def test_relay_stopped_even_if_body_raises(monkeypatch):
         def stop(self):
             stopped.append(True)
 
-    class FakeCamoufox:
-        def __init__(self, **kwargs):
-            pass
-
-        def __enter__(self):
-            return "BROWSER"
-
-        def __exit__(self, *exc):
-            return None
-
     monkeypatch.setattr(browser, "SocksRelay", FakeRelay)
-    monkeypatch.setattr(browser, "Camoufox", FakeCamoufox)
 
     with pytest.raises(RuntimeError, match="boom"):
         with browser.browser_session(proxy="socks5://a:b@up.example:1080"):
             raise RuntimeError("boom")
 
     assert stopped == [True]
+    assert fake_chromium["session"].closed
 
 
 def _fake_relay(exit_ip):
@@ -429,52 +404,51 @@ def _fake_relay(exit_ip):
     return FakeRelay
 
 
-def _fake_camoufox(seen):
-    class FakeCamoufox:
-        def __init__(self, **kwargs):
-            seen.update(kwargs)
-
-        def __enter__(self):
-            return "BROWSER"
-
-        def __exit__(self, *exc):
-            return None
-
-    return FakeCamoufox
-
-
-def test_geoip_uses_exit_ip_from_relay(monkeypatch):
-    """camoufox 的 geoip=True 会自己发请求探测出口 IP，但它走本地 DNS——
-    本地被 fake-ip 污染时会解析出 198.18.x.x，拿去 CONNECT 上游必然失败。
-    中继查到的 IP 直接喂给它，绕开那次探测。"""
-    seen = {}
+def test_timezone_looked_up_through_relay(monkeypatch, fake_chromium):
+    """出口时区必须经中继查（本地 DNS 可能是 fake-ip），查到后交给浏览器。"""
+    asked = []
     monkeypatch.setattr(browser, "SocksRelay", _fake_relay("203.0.113.9"))
-    monkeypatch.setattr(browser, "Camoufox", _fake_camoufox(seen))
+    monkeypatch.setattr(
+        browser, "lookup_timezone", lambda url, **k: asked.append(url) or "Asia/Tokyo",
+    )
 
     with browser.browser_session(proxy="socks5://a:b@up.example:1080"):
         pass
 
-    assert seen["geoip"] == "203.0.113.9", "应传具体 IP，而不是让 camoufox 自己探测"
+    assert asked == ["socks5://127.0.0.1:51234"], "应经本地中继查，不能直连上游"
+    assert fake_chromium["timezone"] == "Asia/Tokyo"
 
 
-def test_geoip_falls_back_to_true_when_exit_ip_unknown(monkeypatch):
-    """查不到出口 IP 就退回 geoip=True，让 camoufox 自己试——
-    降级，而不是直接放弃启动。"""
-    seen = {}
+def test_timezone_unknown_keeps_system_timezone(monkeypatch, fake_chromium):
+    """查不到时区就沿用系统时区——降级，而不是放弃启动。"""
     monkeypatch.setattr(browser, "SocksRelay", _fake_relay(None))
-    monkeypatch.setattr(browser, "Camoufox", _fake_camoufox(seen))
 
     with browser.browser_session(proxy="socks5://a:b@up.example:1080"):
         pass
 
-    assert seen["geoip"] is True
+    assert fake_chromium["timezone"] is None
+
+
+def test_no_timezone_lookup_without_proxy(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("直连时不该去查出口时区")
+
+    monkeypatch.setattr(browser, "lookup_timezone", _boom)
+    assert browser.build_proxy_options(None) == (None, None, None)
+
+
+def test_plain_proxy_timezone_lookup_uses_proxy_url(monkeypatch):
+    asked = []
+    monkeypatch.setattr(browser, "lookup_timezone", lambda url, **k: asked.append(url) or None)
+    browser.build_proxy_options("http://u:p@1.2.3.4:8080")
+    assert asked == ["http://u:p@1.2.3.4:8080"]
 
 
 def test_relay_launch_failure_blames_proxy_not_missing_binary(monkeypatch):
     """中继起不来（比如上游端口不通）时，报错必须指向代理。
 
-    原来这类失败会一路漏到 Camoufox 那层的兜底提示，用户看到的是
-    『请先运行 uv run camoufox fetch，并确认已安装 Xvfb』——完全指错方向。
+    否则这类失败会一路漏到浏览器启动那层的兜底提示，用户看到的是
+    『请先安装浏览器，并确认已安装 Xvfb』——完全指错方向。
     """
     class BoomRelay:
         def __init__(self, upstream_url, **kwargs):
@@ -487,14 +461,14 @@ def test_relay_launch_failure_blames_proxy_not_missing_binary(monkeypatch):
         raise AssertionError("中继起不来就不该再去启动浏览器")
 
     monkeypatch.setattr(browser, "SocksRelay", BoomRelay)
-    monkeypatch.setattr(browser, "Camoufox", _no_launch)
+    monkeypatch.setattr(browser, "launch_chromium", _no_launch)
 
     with pytest.raises(RuntimeError, match="代理"):
         with browser.browser_session(proxy="socks5://a:b@up.example:1080"):
             pass
 
 
-def test_relay_launch_failure_does_not_mention_camoufox_fetch(monkeypatch):
+def test_relay_launch_failure_does_not_mention_browser_install(monkeypatch):
     """具体确认那句误导性提示不会出现。"""
     class BoomRelay:
         def __init__(self, upstream_url, **kwargs):
@@ -504,27 +478,25 @@ def test_relay_launch_failure_does_not_mention_camoufox_fetch(monkeypatch):
             raise OSError("上游端口不通")
 
     monkeypatch.setattr(browser, "SocksRelay", BoomRelay)
-    monkeypatch.setattr(browser, "Camoufox", lambda **kw: None)
+    monkeypatch.setattr(browser, "launch_chromium", lambda **kw: None)
 
     with pytest.raises(RuntimeError) as exc:
         with browser.browser_session(proxy="socks5://a:b@up.example:1080"):
             pass
 
-    assert "camoufox fetch" not in str(exc.value)
+    assert "playwright install" not in str(exc.value)
     assert "Xvfb" not in str(exc.value)
 
 
-def test_build_kwargs_no_proxy():
-    from claude_register.browser import build_camoufox_kwargs
-    kwargs, relay, geoip = build_camoufox_kwargs(None)
-    assert "proxy" not in kwargs
+def test_build_options_no_proxy():
+    proxy, relay, tz = browser.build_proxy_options(None)
+    assert proxy is None
     assert relay is None
-    assert geoip is True
+    assert tz is None
 
 
-def test_build_kwargs_plain_proxy():
-    from claude_register.browser import build_camoufox_kwargs
-    kwargs, relay, geoip = build_camoufox_kwargs("http://1.2.3.4:8080")
-    assert kwargs["proxy"] == {"server": "http://1.2.3.4:8080"}
+def test_build_options_plain_proxy():
+    proxy, relay, tz = browser.build_proxy_options("http://1.2.3.4:8080")
+    assert proxy == {"server": "http://1.2.3.4:8080"}
     assert relay is None          # 无认证不需要中继
-    assert geoip is True
+    assert tz is None

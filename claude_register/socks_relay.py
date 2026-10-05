@@ -1,6 +1,6 @@
 """本地免认证 SOCKS5 中继。
 
-为什么需要它：Firefox / Playwright 明确不支持 SOCKS5 用户名密码认证——
+为什么需要它：Chromium / Playwright 明确不支持 SOCKS5 用户名密码认证——
 playwright driver 的 `normalizeProxySettings` 里就一句
 
     if (url.protocol === "socks5:" && (proxy.username || proxy.password))
@@ -58,7 +58,7 @@ EXIT_IP_TIMEOUT = 12.0
 # 的问题，重试没有意义。
 #
 # 重试总耗时必须远小于 page.goto 的 60s 导航超时：否则上游 hang 住时浏览器先超时，
-# 用户看到的仍是 NS_ERROR_NET_TIMEOUT，而真正有用的报错还没来得及冒出来。
+# 用户看到的仍是没信息量的导航超时，而真正有用的报错还没来得及冒出来。
 # RETRY_DEADLINE 是墙钟硬上限：挂住型失败一次就吃掉一个 HANDSHAKE_TIMEOUT，
 # 预算内装得下两次完整尝试；真的连不上就该早点认输。
 CONNECT_RETRIES = 4
@@ -331,7 +331,7 @@ class _Handler(socketserver.BaseRequestHandler):
             pass
         except Exception as exc:
             # 兜底：任何没预料到的异常都要先回一个错误码再退场。静默断开会让
-            # 浏览器一路挂到导航超时，报出来的还是没信息量的 NS_ERROR_NET_TIMEOUT。
+            # 浏览器一路挂到导航超时，报出来的还是没信息量的超时错误。
             if not self.server.quiet.is_set():
                 self.server.on_error(f"中继内部错误：{exc!r}")
             if not replied:
@@ -365,7 +365,7 @@ class _Server(socketserver.ThreadingTCPServer):
     # 所以自己记一份在跑的连接，stop() 时挨个掐断。
     daemon_threads = True
     allow_reuse_address = True
-    # 默认 5 太小：Firefox 加载一个页面会并行开十几条连接，backlog 满了之后
+    # 默认 5 太小：浏览器加载一个页面会并行开十几条连接，backlog 满了之后
     # 新连接会被内核直接拒（或干脆丢弃等重传），表现就是页面偶发加载不全。
     request_queue_size = 128
 
@@ -475,7 +475,7 @@ class SocksRelay:
         """经中继查出口 IP，查不到返回 None。
 
         必须走中继：本地 DNS 可能被 fake-ip 污染，本地直查会得到 198.18.x.x
-        这类虚拟地址。camoufox 的 geoip=True 就是栽在这上面——它用本地解析的
+        这类虚拟地址；拿本地解析出的
         地址去 CONNECT，上游认不得，直接关连接。
 
         挨个试几个站点：上游对个别目标可能直接拒（实测 api.ipify.org 会被拒，

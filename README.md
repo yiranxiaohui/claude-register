@@ -11,7 +11,7 @@ CLI 方式（本地跑 `main.py`）：
 
 ```text
 uv sync
-uv run camoufox fetch
+uv run playwright install chromium
 ```
 
 AnyMail API Key 需要的 scope：`emails:read` + `accounts:write`（若没固定 `ANYMAIL_DOMAIN`，再加 `domains:read`），并限定账号类型为 `Domain`。
@@ -180,25 +180,29 @@ uv run main.py --login-timeout 0
 
 ## 已知的坑
 
-**浏览器引擎是 Camoufox（Firefox 系隐身浏览器），不是 Chromium。** headless 档位
-按平台自动选，不用手动改代码：
+**浏览器引擎是 Playwright 自带的 Chromium（`channel="chromium"`）。** 注册与接管都用它；
+启动时去掉了 `--enable-automation`（否则 `navigator.webdriver=true`）和 Blink 自动化特征，
+配了代理时浏览器时区按代理出口 IP 对齐，并禁止 WebRTC 走代理以外的 UDP（防真实 IP 泄漏）。
+headless 档位按平台自动选，不用手动改代码：
 
 | 平台 | 档位 | 说明 |
 | --- | --- | --- |
-| Linux + 装了 Xvfb | `headless="virtual"` | 自动包一层 Xvfb 虚拟显示，适配无图形界面的服务器/容器 |
+| Linux + 装了 Xvfb | `"virtual"` | 自己拉一个 Xvfb（显示号 `:110` 起，避开接管的 `:100`），Chromium 以有头模式挂上去 |
 | Windows / macOS | `headless=False` | 桌面本来就是真显示器，会弹出真实浏览器窗口 |
 | Linux 无 Xvfb | `headless=True` | 兜底，能跑但指纹弱一档，更容易被 Cloudflare 拦 |
 
 前两档都比真 headless 更能扛住 Cloudflare 挑战。`virtual` 这一档**只有 Linux 能用**
-——它本质是 X11 的虚拟帧缓冲，而 Windows 上的 `camoufox.exe` 是原生 Win32 构建，
-不走 X11，装 Xvfb 也没用。运行前都需要跑过一次 `uv run camoufox fetch` 下载浏览器二进制。
+——它本质是 X11 的虚拟帧缓冲。运行前需要跑过一次 `uv run playwright install chromium`
+下载浏览器（Docker 镜像构建时已装好）。
 
 **虚拟显示下你看不到浏览器实时画面。** 这条只对 Linux 的 `virtual`/`headless` 档成立；
 Windows/macOS 上有真窗口，能直接看到页面。关键步骤在所有平台都会截图到 `output/`。
 默认的魔术链接路径全程无需人工实时交互，不受影响；但如果走到验证码那条路弹出了
 hCaptcha 拖拽题，在没有图形界面的机器上就没法手动拖拽——需要换到带显示的环境，或接 VNC。
 
-**Cloudflare。** claude.ai 前面有 Cloudflare 挑战，实测等待时长在 30 秒到 120 秒以上之间波动，有时会直接超时，偶尔放行后还会返回一个完全空白、没有任何输入框的页面。这不是脚本的问题，重试或换个时间即可。超时会自动截图到 `output/waiting_login.png`。
+**Cloudflare。** claude.ai 前面有 Cloudflare 挑战。代理出口 IP 风险较高时，Cloudflare 会要求勾选
+「Verify you are human」：注册流程会在挑战页停留数秒后自动勾选（每 15 秒重试一次），接管时在画面里
+手动点一下即可。超时会自动截图到 `output/waiting_login.png`。
 
 **hCaptcha。** 如果走验证码那条路，点提交后可能弹出 hCaptcha 拖拽验证。程序**只检测、不尝试绕过**——检测到会打印提示并保留浏览器，需要你手动拖拽完成。魔术链接这条路不经过这一步。
 
