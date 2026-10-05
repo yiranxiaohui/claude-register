@@ -217,8 +217,42 @@ def lookup_timezone(proxy_url: str | None, *, timeout: float = 6.0) -> str | Non
     return None
 
 
+# 中继当场回绝、不占上游槽位的目标（后缀匹配）。实测 Chromium 即便带着
+# --disable-background-networking，打开登录页时仍会连这些后台服务；连同页面上的
+# 统计追踪，峰值能开到近 30 条隧道，而机场上游只给 3~4 条并发——Camoufox 自带
+# uBlock Origin 时不会有这些连接。
+CHROMIUM_BACKGROUND_HOSTS = (
+    "clients1.google.com",
+    "clients2.google.com",
+    "clients4.google.com",
+    "clientservices.googleapis.com",
+    "content-autofill.googleapis.com",
+    "optimizationguide-pa.googleapis.com",
+    "safebrowsing.googleapis.com",
+    "update.googleapis.com",
+    "mtalk.google.com",
+    "android.clients.google.com",
+    "redirector.gvt1.com",
+    "edgedl.me.gvt1.com",
+)
+# Datadog RUM 的上报域名是 browser-intake-<区域>-datadoghq.com，不是 datadoghq.com 的子域。
+TRACKER_HOSTS = (
+    "datadoghq.com",
+    "browser-intake-datadoghq.com",
+    "browser-intake-us3-datadoghq.com",
+    "browser-intake-us5-datadoghq.com",
+    "browser-intake-ap1-datadoghq.com",
+    "browser-intake-datadoghq.eu",
+)
+# 接管里用户可能要用 Google 搜索，只在无人值守的注册流程里挡掉
+# www.google.com（Chromium 后台对它反复预连接）。
+TAKEOVER_DENY_HOSTS = CHROMIUM_BACKGROUND_HOSTS + TRACKER_HOSTS
+REGISTRATION_DENY_HOSTS = TAKEOVER_DENY_HOSTS + ("www.google.com",)
+
+
 def build_proxy_options(
-    proxy: str | None, *, max_upstream: int | None = None
+    proxy: str | None, *, max_upstream: int | None = None,
+    deny_hosts=REGISTRATION_DENY_HOSTS,
 ) -> tuple[dict | None, "SocksRelay | None", str | None]:
     """把代理配置转成 Playwright 的 proxy 参数，并查出口时区。
 
@@ -228,6 +262,7 @@ def build_proxy_options(
 
     max_upstream 透传给中继的上游并发闸门：注册流程不传（用默认 3，匹配
     机场硬限额）；接管是交互式浏览，长命连接会钉死小闸门，调用方应放宽。
+    deny_hosts 是中继当场回绝的目标（见 REGISTRATION_DENY_HOSTS）。
     """
     proxy_cfg = parse_proxy(proxy)
     if proxy_cfg is None:
@@ -253,6 +288,7 @@ def build_proxy_options(
                 normalize_proxy_url(proxy),
                 on_error=_relay_log,
                 max_upstream=max_upstream,
+                deny_hosts=deny_hosts,
             ).start()
         except Exception as exc:
             raise RuntimeError(
