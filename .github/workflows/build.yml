@@ -17,10 +17,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # latest 与完整 commit SHA 照旧；推 v* 标签时额外打同名版本标签（如 v0.2.0），
+      # 供部署固定版本与回滚。
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/yiranxiaohui/claude-register
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long,prefix=
+            type=ref,event=tag
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/yiranxiaohui/claude-register:latest
-            ghcr.io/yiranxiaohui/claude-register:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
