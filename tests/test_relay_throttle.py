@@ -261,3 +261,115 @@ def test_slot_wait_timeout_replies_failure_not_hang(monkeypatch):
                 hog.close()
     finally:
         up.close()
+
+
+def _open_tunnel(relay_port: int, host: str = "example.com") -> tuple[socket.socket, int]:
+    """建隧道但不发数据，返回 (socket, rep)。"""
+    s = socket.create_connection(("127.0.0.1", relay_port), 8)
+    s.settimeout(8)
+    s.sendall(bytes([0x05, 0x01, 0x00]))
+    s.recv(2)
+    d = host.encode()
+    s.sendall(b"\x05\x01\x00\x03" + bytes([len(d)]) + d + struct.pack("!H", 443))
+    rep = s.recv(10)
+    return s, (rep[1] if rep else -1)
+
+
+def test_idle_tunnel_is_evicted_when_someone_waits(monkeypatch):
+    """槽位被一条闲置的 keep-alive 隧道占着时，排队的新连接应把它挤掉并顺利通过，
+    而不是等到 SLOT_WAIT_TIMEOUT 失败——Chromium 闲置连接一留就是几分钟。"""
+    monkeypatch.setattr(socks_relay, "SLOT_WAIT_TIMEOUT", 5.0)
+    up = CappedUpstream("alice", "s3cret", cap=1)
+    try:
+        with SocksRelay(
+            f"socks5://alice:s3cret@127.0.0.1:{up.port}", max_upstream=1,
+            idle_evict_after=0.3,
+        ) as relay:
+            hog, rep = _open_tunnel(relay.port)
+            assert rep == 0x00
+            try:
+                started = time.monotonic()
+                got = _connect_and_echo(relay.port, "example.com", 443, payload=b"X")
+                assert got == b"OKX"
+                assert time.monotonic() - started < 3.0, "应在回收闲置隧道后很快拿到槽位"
+                assert hog.recv(10) == b"", "被回收的闲置隧道应被掐断"
+            finally:
+                hog.close()
+        assert up.max_active <= 1, "回收后仍不能超订上游"
+    finally:
+        up.close()
+
+
+def test_idle_eviction_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(socks_relay, "SLOT_WAIT_TIMEOUT", 0.6)
+    up = CappedUpstream("alice", "s3cret", cap=1)
+    try:
+        with SocksRelay(
+            f"socks5://alice:s3cret@127.0.0.1:{up.port}", max_upstream=1,
+            idle_evict_after=None,
+        ) as relay:
+            hog, rep = _open_tunnel(relay.port)
+            try:
+                _, rep2 = _open_tunnel(relay.port)
+                assert rep2 != 0x00, "关掉回收时应照旧排队到超时失败"
+            finally:
+                hog.close()
+    finally:
+        up.close()
+
+
+def test_evict_idle_picks_longest_idle_over_threshold():
+    server = socks_relay._Server(("127.0.0.1", 0), socks_relay._Handler,
+                                 max_upstream=1, idle_evict_after=1.0)
+    try:
+        now = time.monotonic()
+
+        class T:
+            def __init__(self, idle):
+                self.last_active = now - idle
+                self.evicted = False
+                self.killed = False
+
+            def evict(self):
+                self.killed = True
+
+        busy, old, older = T(0.2), T(2.0), T(5.0)
+        for t in (busy, old, older):
+            server.add_tunnel(t)
+        assert server.evict_idle() is True
+        assert older.killed and not old.killed and not busy.killed
+        assert server.evict_idle() is True
+        assert old.killed and not busy.killed
+        assert server.evict_idle() is False, "活跃隧道不能被回收"
+    finally:
+        server.server_close()
+
+
+@pytest.mark.parametrize("host", ["mtalk.google.com", "browser-intake-us5-datadoghq.com"])
+def test_denied_hosts_rejected_without_touching_upstream(host):
+    """拒绝名单里的目标当场回 not-allowed，不连上游、不占槽位。"""
+    up = CappedUpstream("alice", "s3cret", cap=1)
+    try:
+        with SocksRelay(
+            f"socks5://alice:s3cret@127.0.0.1:{up.port}", max_upstream=1,
+            deny_hosts=("mtalk.google.com", "browser-intake-us5-datadoghq.com"),
+        ) as relay:
+            hog, rep = _open_tunnel(relay.port)  # 占满唯一槽位
+            try:
+                started = time.monotonic()
+                s, rep = _open_tunnel(relay.port, host)
+                s.close()
+                assert rep == 0x02
+                assert time.monotonic() - started < 1.0, "拒绝名单不该排队等槽位"
+            finally:
+                hog.close()
+        assert up.max_active == 1, "被拒的目标不应连到上游"
+    finally:
+        up.close()
+
+
+def test_deny_match_is_suffix_based_not_substring():
+    assert socks_relay._host_matches("a.datadoghq.com", ("datadoghq.com",))
+    assert socks_relay._host_matches("DATADOGHQ.com.", ("datadoghq.com",))
+    assert not socks_relay._host_matches("notdatadoghq.com", ("datadoghq.com",))
+    assert not socks_relay._host_matches("claude.ai", ("datadoghq.com",))

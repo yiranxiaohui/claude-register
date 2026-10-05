@@ -11,6 +11,7 @@ import time
 from claude_register.anymail import AnyMailClient
 from claude_register.browser import (
     BROWSER_INSTALL_HINT,
+    TAKEOVER_DENY_HOSTS,
     URL as LOGIN_URL,
     build_proxy_options,
     extract_session_key,
@@ -180,7 +181,8 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
     直接打开登录页（可选预填邮箱），由用户在接管画面里完成登录。
     """
     proxy_options, relay, timezone = build_proxy_options(
-        proxy or None, max_upstream=takeover_max_upstream()
+        proxy or None, max_upstream=takeover_max_upstream(),
+        deny_hosts=TAKEOVER_DENY_HOSTS,
     )
     try:
         session = launch_chromium(

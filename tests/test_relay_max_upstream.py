@@ -13,8 +13,9 @@ from server import takeover_browser
 class _FakeRelay:
     captured: dict = {}
 
-    def __init__(self, url, *, on_error=None, max_upstream=None):
-        _FakeRelay.captured = {"url": url, "max_upstream": max_upstream}
+    def __init__(self, url, *, on_error=None, max_upstream=None, deny_hosts=()):
+        _FakeRelay.captured = {"url": url, "max_upstream": max_upstream,
+                               "deny_hosts": tuple(deny_hosts)}
         self.local_url = "socks5://127.0.0.1:1"
 
     def start(self):
@@ -90,6 +91,7 @@ def test_takeover_browser_uses_wide_relay_and_display(monkeypatch):
     )
 
     assert _FakeRelay.captured["max_upstream"] == 16
+    assert _FakeRelay.captured["deny_hosts"] == takeover_browser.TAKEOVER_DENY_HOSTS
     assert seen["launch"]["headless"] is False
     assert seen["launch"]["display"] == ":100"
     assert seen["launch"]["proxy"] == {"server": "socks5://127.0.0.1:1"}
@@ -97,3 +99,28 @@ def test_takeover_browser_uses_wide_relay_and_display(monkeypatch):
     assert seen["cookies"][0]["name"] == "sessionKey"
     assert seen["url"] == "https://claude.ai"
     handle.close()
+
+
+def test_registration_and_takeover_deny_lists(monkeypatch):
+    seen = []
+
+    class Rec(_FakeRelay):
+        def __init__(self, url, *, deny_hosts=(), **kwargs):
+            super().__init__(url, **kwargs)
+            seen.append(tuple(deny_hosts))
+
+    monkeypatch.setattr(browser_mod, "SocksRelay", Rec)
+    browser_mod.build_proxy_options("socks5://u:p@h:1080")
+    assert "www.google.com" in seen[-1], "注册流程要挡掉 Chromium 对 Google 的后台预连接"
+    assert "mtalk.google.com" in seen[-1]
+    assert "browser-intake-us5-datadoghq.com" in seen[-1], "实测 claude.ai 用的 RUM 上报域名"
+    # 页面功能依赖的目标绝不能进拒绝名单
+    for essential in ("claude.ai", "anthropic.com", "challenges.cloudflare.com", "hcaptcha.com",
+                      "accounts.google.com"):
+        assert essential not in seen[-1]
+
+    browser_mod.build_proxy_options(
+        "socks5://u:p@h:1080", deny_hosts=browser_mod.TAKEOVER_DENY_HOSTS,
+    )
+    assert "www.google.com" not in seen[-1], "接管里用户可能要用 Google 搜索"
+    assert "mtalk.google.com" in seen[-1]

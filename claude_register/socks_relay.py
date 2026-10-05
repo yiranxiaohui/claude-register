@@ -34,6 +34,7 @@ ATYP_IPV6 = 0x04
 
 REP_SUCCESS = 0x00
 REP_GENERAL_FAILURE = 0x01
+REP_NOT_ALLOWED = 0x02
 REP_HOST_UNREACHABLE = 0x04
 REP_CMD_NOT_SUPPORTED = 0x07
 REP_ATYP_NOT_SUPPORTED = 0x08
@@ -76,6 +77,15 @@ MAX_CREDENTIAL_LEN = 255
 # 默认取 3 而非实测的 ~4：留一格余量，免得上游偶尔只放 3 条（关连接的 TIME_WAIT
 # 残留、服务端抖动）时又擦边超订、重新触发 hang。确知上游能吃满 4 条时可上调。
 DEFAULT_MAX_UPSTREAM = 3
+
+# 空闲隧道回收：有连接在排队等槽位时，把空闲（双向都没有字节）超过这么久的
+# 隧道掐掉，把槽位让给排队者。浏览器（尤其 Chromium）会把用过的 keep-alive
+# 连接留着复用好几分钟，槽位按隧道生命周期持有，几条闲置连接就能把 3 个槽位
+# 钉死，新请求全在本地排队到超时。被掐的是闲置的复用连接，浏览器下次需要时
+# 自己重连（复用连接上的请求失败也会自动重发），代价只是多一次握手。
+IDLE_EVICT_AFTER = 5.0
+# 排队期间检查一次可回收隧道的间隔。
+EVICT_POLL = 0.25
 
 # 等本地槽位的上限。排队是常态，给足耐心；但不能无限等——真出现死锁式占满
 # 时，超过这个时间就回一个明确的失败码，好过让浏览器一路挂到导航超时。
@@ -231,14 +241,48 @@ def _connect_upstream(cfg: dict, host: str, port: int) -> socket.socket:
     raise last
 
 
-def _pipe(src: socket.socket, dst: socket.socket) -> None:
+def _host_matches(host: str, patterns) -> bool:
+    """host 等于某个模式，或是它的子域名（不区分大小写）。"""
+    host = host.lower().rstrip(".")
+    return any(host == p or host.endswith("." + p) for p in patterns)
+
+
+class _Tunnel:
+    """一条已建立的隧道：记最近活动时间，供空闲回收挑选。"""
+
+    __slots__ = ("client", "upstream", "last_active", "evicted")
+
+    def __init__(self, client: socket.socket, upstream: socket.socket):
+        self.client = client
+        self.upstream = upstream
+        self.last_active = time.monotonic()
+        self.evicted = False
+
+    def touch(self) -> None:
+        self.last_active = time.monotonic()
+
+    def evict(self) -> None:
+        """掐断隧道：shutdown 唤醒两个方向阻塞在 recv 上的 _pipe，handler 随之收尾、释放槽位。"""
+        self.evicted = True
+        for sock in (self.client, self.upstream):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+def _pipe(src: socket.socket, dst: socket.socket, tunnel: _Tunnel | None = None) -> None:
     """单向搬字节，直到一端关闭。"""
     try:
         while True:
             data = src.recv(PIPE_BUFFER)
             if not data:
                 break
+            if tunnel is not None:
+                tunnel.touch()
             dst.sendall(data)
+            if tunnel is not None:
+                tunnel.touch()
     except OSError:
         pass
     finally:
@@ -291,10 +335,16 @@ class _Handler(socketserver.BaseRequestHandler):
                 self._reply(client, REP_CMD_NOT_SUPPORTED)
                 return
 
+            # 拒绝名单（浏览器后台服务、统计追踪）当场回绝，不占上游槽位：
+            # 这类连接对注册/接管毫无用处，却会长期钉住稀缺的上游并发。
+            if _host_matches(host, self.server.deny_hosts):
+                self._reply(client, REP_NOT_ALLOWED)
+                return
+
             # 占一个上游并发槽位，全程持有到隧道结束——上游的限额是对「同时打开
             # 的连接数」而言，只在握手期占位挡不住后面并发的数据连接超订。拿不到
             # 槽位就在本地排队等，超过 SLOT_WAIT_TIMEOUT 才认输回失败码。
-            if not self.server.upstream_slots.acquire(timeout=SLOT_WAIT_TIMEOUT):
+            if not self.server.acquire_slot(SLOT_WAIT_TIMEOUT):
                 if not self.server.quiet.is_set():
                     self.server.on_error(
                         f"{host}:{port} → 等待上游并发槽位超时（{SLOT_WAIT_TIMEOUT:.0f}s，"
@@ -320,13 +370,20 @@ class _Handler(socketserver.BaseRequestHandler):
             # 上游侧也要登记：反向 _pipe 阻塞在 upstream.recv 上，只掐客户端
             # 那一头的话 back.join() 仍会卡住，整个 handler 还是活的。
             self.server.track(upstream)
+            tunnel = _Tunnel(client, upstream)
+            self.server.add_tunnel(tunnel)
 
             # 双向转发。一个方向放到后台线程，另一个方向留在当前线程，
             # 这样 handle() 返回时隧道确实结束了（socketserver 会跟着关连接）。
-            back = threading.Thread(target=_pipe, args=(upstream, client), daemon=True)
-            back.start()
-            _pipe(client, upstream)
-            back.join()
+            try:
+                back = threading.Thread(
+                    target=_pipe, args=(upstream, client, tunnel), daemon=True,
+                )
+                back.start()
+                _pipe(client, upstream, tunnel)
+                back.join()
+            finally:
+                self.server.remove_tunnel(tunnel)
         except (OSError, ConnectionError):
             pass
         except Exception as exc:
@@ -369,12 +426,54 @@ class _Server(socketserver.ThreadingTCPServer):
     # 新连接会被内核直接拒（或干脆丢弃等重传），表现就是页面偶发加载不全。
     request_queue_size = 128
 
-    def __init__(self, *args, max_upstream: int = DEFAULT_MAX_UPSTREAM, **kwargs):
+    def __init__(self, *args, max_upstream: int = DEFAULT_MAX_UPSTREAM,
+                 deny_hosts=(), idle_evict_after: float | None = IDLE_EVICT_AFTER,
+                 **kwargs):
         self._live: set[socket.socket] = set()
         self._live_lock = threading.Lock()
         # 限中继对上游的并发连接数，匹配上游的硬上限，避免超订。
         self.upstream_slots = threading.BoundedSemaphore(max_upstream)
+        self.deny_hosts = tuple(h.lower().rstrip(".") for h in deny_hosts)
+        self.idle_evict_after = idle_evict_after
+        self._tunnels: set[_Tunnel] = set()
+        self._tunnels_lock = threading.Lock()
         super().__init__(*args, **kwargs)
+
+    def add_tunnel(self, tunnel: _Tunnel) -> None:
+        with self._tunnels_lock:
+            self._tunnels.add(tunnel)
+
+    def remove_tunnel(self, tunnel: _Tunnel) -> None:
+        with self._tunnels_lock:
+            self._tunnels.discard(tunnel)
+
+    def evict_idle(self) -> bool:
+        """掐掉空闲最久、且已空闲超过阈值的一条隧道；返回是否掐了。"""
+        if self.idle_evict_after is None:
+            return False
+        now = time.monotonic()
+        with self._tunnels_lock:
+            candidates = [
+                t for t in self._tunnels
+                if not t.evicted and now - t.last_active >= self.idle_evict_after
+            ]
+            if not candidates:
+                return False
+            victim = min(candidates, key=lambda t: t.last_active)
+            victim.evicted = True
+        victim.evict()
+        return True
+
+    def acquire_slot(self, timeout: float) -> bool:
+        """拿一个上游槽位；排队期间顺手回收空闲隧道，超时返回 False。"""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self.upstream_slots.acquire(timeout=min(EVICT_POLL, remaining)):
+                return True
+            self.evict_idle()
 
     def track(self, sock: socket.socket) -> None:
         with self._live_lock:
@@ -420,9 +519,12 @@ class SocksRelay:
 
     host = "127.0.0.1"
 
-    def __init__(self, upstream_url: str, *, on_error=None, max_upstream: int | None = None):
+    def __init__(self, upstream_url: str, *, on_error=None, max_upstream: int | None = None,
+                 deny_hosts=(), idle_evict_after: float | None = IDLE_EVICT_AFTER):
         self._cfg = self._parse_upstream(upstream_url)
         self._on_error = on_error or (lambda msg: None)
+        self._deny_hosts = tuple(deny_hosts)
+        self._idle_evict_after = idle_evict_after
         self._max_upstream = (
             max_upstream if max_upstream and max_upstream > 0 else _default_max_upstream()
         )
@@ -461,7 +563,10 @@ class SocksRelay:
         return f"socks5://{self.host}:{self.port}"
 
     def start(self) -> SocksRelay:
-        server = _Server((self.host, 0), _Handler, max_upstream=self._max_upstream)
+        server = _Server(
+            (self.host, 0), _Handler, max_upstream=self._max_upstream,
+            deny_hosts=self._deny_hosts, idle_evict_after=self._idle_evict_after,
+        )
         server.upstream_cfg = self._cfg
         server.on_error = self._on_error
         server.quiet = threading.Event()
