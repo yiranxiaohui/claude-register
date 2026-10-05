@@ -18,8 +18,8 @@ from server.window_fit import (
 )
 
 
-def _win(id=1, instance="Navigator", viewable=True, override=False, geo=(0, 0, 1280, 900)):
-    return TopLevel(id, instance, viewable, override, *geo)
+def _win(id=1, wm_class="Chromium-browser", viewable=True, override=False, geo=(0, 0, 1280, 900)):
+    return TopLevel(id, wm_class, viewable, override, *geo)
 
 
 def test_fit_size_matches_client_desktop():
@@ -53,10 +53,15 @@ def test_plan_ignores_menus_hidden_and_non_browser_windows():
     windows = [
         _win(id=2, override=True),            # 下拉框/右键菜单：浏览器自己定位
         _win(id=3, viewable=False),           # 未映射
-        _win(id=4, instance="Camoufox"),      # Camoufox 的 288x56 辅助窗口
+        _win(id=4, wm_class="Xpra"),          # 非浏览器窗口
         _win(id=5),                           # 真正的浏览器主窗口
     ]
     assert plan_fit((1920, 1040), windows) == [(5, (1920, 1040))]
+
+
+@pytest.mark.parametrize("wm_class", ["Chromium-browser", "Chromium", "Google-chrome"])
+def test_chromium_window_classes_are_recognised(wm_class):
+    assert plan_fit((1600, 900), [_win(wm_class=wm_class)]) == [(1, (1600, 900))]
 
 
 def test_plan_noop_before_client_connects():
@@ -106,17 +111,17 @@ def test_fitter_resizes_real_browser_window_but_not_menus(xvfb):
     d = display.Display(xvfb)
     root = d.screen().root
 
-    def make(instance, w, h, override=False):
+    def make(wm_class, w, h, override=False):
         win = root.create_window(
             0, 0, w, h, 0, d.screen().root_depth, X.InputOutput, X.CopyFromParent,
             override_redirect=override,
         )
-        win.set_wm_class(instance, "camoufox")
+        win.set_wm_class("chromium-browser (/tmp/profile)", wm_class)
         win.map()
         return win
 
-    browser = make("Navigator", 1280, 900)
-    menu = make("Navigator", 200, 300, override=True)
+    browser = make("Chromium-browser", 1280, 900)
+    menu = make("Chromium-browser", 200, 300, override=True)
     d.sync()
 
     fitter = WindowFitter(xvfb, interval=0.05).start()
@@ -129,7 +134,7 @@ def test_fitter_resizes_real_browser_window_but_not_menus(xvfb):
         assert geo(menu) == (0, 0, 200, 300)  # override-redirect 菜单不被拉伸
 
         # 新开的浏览器窗口（如弹窗）同样会被铺满
-        second = make("Navigator", 640, 480)
+        second = make("Chromium-browser", 640, 480)
         d.sync()
         assert _wait(lambda: geo(second) == (0, 0, 1672, 855)), geo(second)
     finally:

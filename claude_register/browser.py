@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import os
 import random
 import re
 import shutil
@@ -11,10 +12,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from camoufox.sync_api import Camoufox
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, expect, sync_playwright
 
 from claude_register.console import current_sink, log
+from claude_register.display import VirtualDisplay
 from claude_register.socks_relay import SocksRelay
 
 URL = "https://claude.ai/login"
@@ -28,9 +29,9 @@ _STEP_STALL_MS = 20_000
 # 此时探针全落空，但下一步其实马上就渲染出来了。
 _BLANK_TRANSITION_MS = 10_000
 
-# Playwright 的 toJugglerProxyOptions 只认这四个 scheme；碰上不认识的会静默降级成
-# http 代理（`let type = "http"` 的默认分支），于是浏览器拿 HTTP CONNECT 去捅一个
-# 非 HTTP 端口，对端不回包 → NS_ERROR_NET_TIMEOUT。宁可在这里明确拒绝。
+# 浏览器代理只认这四个 scheme；碰上不认识的会被当成 http 代理（或直接报错），
+# 浏览器拿 HTTP CONNECT 去捅一个非 HTTP 端口，对端不回包 → 导航超时。
+# 宁可在这里明确拒绝。
 _PLAYWRIGHT_SCHEMES = {"http", "https", "socks4", "socks5"}
 # socks5h 是 curl 的写法（h = 由代理做 DNS）。Playwright 走 SOCKS5 时本来就是远端
 # 解析，语义等价，归一化掉即可。
@@ -111,21 +112,16 @@ def screenshot(page: Page, name: str) -> Path:
 def pick_headless() -> str | bool:
     """按平台选 headless 档位。
 
-    "virtual" 就是 Xvfb（X11 虚拟帧缓冲）：camoufox 会 Popen 一个 Xvfb 进程再把
-    DISPLAY 塞进环境变量。它在 virtdisplay.py 里 assert_linux() 拦掉非 Linux 平台
-    ——Windows 的 camoufox.exe 是原生 Win32 构建，不走 X11，DISPLAY 对它没有意义。
-    所以 virtual 不是「还没适配 Windows」，是概念上不存在。
-
-    但 virtual 要解决的问题（无显示器的机器上不想用真 headless，指纹太弱）在有桌面的
-    平台上本来就不存在：直接 headless=False 用真显示器，比 Xvfb 还真。于是：
+    "virtual" = 自己拉一个 Xvfb（见 display.VirtualDisplay），Chromium 以有头模式挂上去。
+    无显示器的服务器/容器上这比真 headless 指纹更像真人，更抗 Cloudflare。
+    Xvfb 是 X11 的东西，只有 Linux 能用；有桌面的平台直接开真窗口，比 Xvfb 还真：
 
         Linux + 有 Xvfb  → "virtual"  容器/无头服务器的既有路径
         Linux 无 Xvfb    → True       只剩真 headless，指纹弱一档但能跑
         Windows / macOS  → False      桌面就是显示器，开真窗口
 
-    判 Linux 用 sys.platform 而不是只查 which("Xvfb")：camoufox 拦的是
-    OS_NAME != 'lin'，装了 WSL/Cygwin 的 Windows 上 which 可能真的命中一个
-    Xvfb.exe，那时选 virtual 依然会崩。
+    判 Linux 用 sys.platform 而不是只查 which("Xvfb")：装了 WSL/Cygwin 的 Windows 上
+    which 可能真的命中一个 Xvfb.exe，但原生 Windows 浏览器根本不走 X11。
     """
     if sys.platform.startswith("linux"):
         return "virtual" if shutil.which("Xvfb") else True
@@ -135,7 +131,7 @@ def pick_headless() -> str | bool:
 def needs_relay(proxy_cfg: dict | None) -> bool:
     """带凭据的 SOCKS5 需要本地中继。
 
-    Firefox 不支持 SOCKS5 用户名密码认证，playwright driver 里直接抛
+    Chromium 不支持 SOCKS5 用户名密码认证，playwright 里直接抛
     "Browser does not support socks5 proxy authentication"。HTTP/HTTPS 代理的
     认证是支持的，无凭据的 socks5 也没问题——那些不必多绕一层。
     """
@@ -179,117 +175,243 @@ def validate_proxy(url: str | None) -> dict | None:
     return cfg
 
 
-def build_camoufox_kwargs(
+# 查出口 IP 所在时区的站点（按顺序尝试），取 JSON 里的 timezone 字段。
+TIMEZONE_LOOKUP_URLS = (
+    "https://ipinfo.io/json",
+    "https://ipapi.co/json/",
+    "https://ipwho.is/",
+)
+_TZ_RE = re.compile(r"^(UTC|[A-Za-z_]+(?:/[A-Za-z0-9_+\-]+)+)$")
+
+
+def lookup_timezone(proxy_url: str | None, *, timeout: float = 6.0) -> str | None:
+    """经代理查出口 IP 的 IANA 时区（如 Asia/Tokyo），查不到返回 None。
+
+    浏览器时区若与出口 IP 所在地对不上，是风控常用的可疑信号。SOCKS 一律用
+    socks5h，域名交给上游解析：本地 DNS 可能是 fake-ip（198.18.x.x），拿虚拟
+    地址去 CONNECT 上游只会被拒。
+    """
+    if not proxy_url:
+        return None
+    if proxy_url.startswith("socks5://"):
+        proxy_url = "socks5h://" + proxy_url[len("socks5://"):]
+    try:
+        from curl_cffi import requests as cffi_requests
+    except Exception:  # noqa: BLE001
+        return None
+    for url in TIMEZONE_LOOKUP_URLS:
+        try:
+            resp = cffi_requests.get(
+                url, proxy=proxy_url, timeout=timeout, impersonate="chrome",
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            continue
+        tz = data.get("timezone") if isinstance(data, dict) else None
+        if isinstance(tz, dict):  # ipwho.is: {"timezone": {"id": "Asia/Tokyo", ...}}
+            tz = tz.get("id")
+        if isinstance(tz, str) and _TZ_RE.match(tz.strip()):
+            return tz.strip()
+    return None
+
+
+def build_proxy_options(
     proxy: str | None, *, max_upstream: int | None = None
-) -> tuple[dict, "SocksRelay | None", str | bool]:
-    """把代理配置转成 Camoufox 的 proxy kwargs，并决定 geoip。
+) -> tuple[dict | None, "SocksRelay | None", str | None]:
+    """把代理配置转成 Playwright 的 proxy 参数，并查出口时区。
 
     注册会话与接管会话共用这段：解析代理 → 带认证 SOCKS5 起本地中继 →
-    用出口 IP 对齐 geoip → 组 kwargs。返回 (kwargs, relay, geoip)，
-    relay 需由调用方在会话结束时 stop()。
+    经代理查出口时区。返回 (proxy, relay, timezone)；relay 需由调用方在会话
+    结束时 stop()，timezone 为 None 表示沿用系统时区。
 
     max_upstream 透传给中继的上游并发闸门：注册流程不传（用默认 3，匹配
     机场硬限额）；接管是交互式浏览，长命连接会钉死小闸门，调用方应放宽。
     """
     proxy_cfg = parse_proxy(proxy)
+    if proxy_cfg is None:
+        return None, None, None
     relay = None
-    kwargs: dict = {}
-    # geoip 让指纹（时区/地理）跟代理出口 IP 对齐。True 表示让 camoufox 自己去探测，
-    # 但它那次探测走本地 DNS——本地被 fake-ip 污染时（Clash 一类透明代理把域名解析成
-    # 198.18.x.x）会拿虚拟地址去 CONNECT，上游认不得直接关连接，启动就崩了。
-    # 所以只要中继能查到出口 IP，就直接把 IP 喂给它，跳过那次探测。
-    geoip: str | bool = True
-    if proxy_cfg is not None:
-        if needs_relay(proxy_cfg):
-            # on_error 是在中继自己的线程里回调的，而 console 的 sink 是 ContextVar
-            # ——新线程起来时上下文是空的，日志会直接打到 stdout，网页端的 log.txt
-            # 里什么都看不到。这里在当前上下文里把 sink 取出来，回调时直接用。
-            #
-            # 不用 contextvars.copy_context()：Context 不可重入，两个 handler 线程
-            # 同时报错时后来的那个会撞上 "is already entered"，日志反而丢得更多——
-            # 而并发报错恰恰是撞上游限额时的常态。
-            relay_sink = current_sink()
+    if needs_relay(proxy_cfg):
+        # on_error 是在中继自己的线程里回调的，而 console 的 sink 是 ContextVar
+        # ——新线程起来时上下文是空的，日志会直接打到 stdout，网页端的 log.txt
+        # 里什么都看不到。这里在当前上下文里把 sink 取出来，回调时直接用。
+        #
+        # 不用 contextvars.copy_context()：Context 不可重入，两个 handler 线程
+        # 同时报错时后来的那个会撞上 "is already entered"，日志反而丢得更多——
+        # 而并发报错恰恰是撞上游限额时的常态。
+        relay_sink = current_sink()
 
-            def _relay_log(msg: str) -> None:
-                relay_sink(f"代理中继：{msg}")
+        def _relay_log(msg: str) -> None:
+            relay_sink(f"代理中继：{msg}")
 
-            # 中继起不来是代理的问题，得当场说清楚。漏到下面那个 Camoufox 兜底
-            # 里会变成「请先运行 camoufox fetch」，把人往完全无关的方向带。
-            try:
-                relay = SocksRelay(
-                    normalize_proxy_url(proxy),
-                    on_error=_relay_log,
-                    max_upstream=max_upstream,
-                ).start()
-            except Exception as exc:
-                raise RuntimeError(
-                    f"启动本地代理中继失败（{exc}）。请检查代理地址 "
-                    f"{proxy_cfg['server']} 是否可达。"
-                ) from exc
-            kwargs["proxy"] = {"server": relay.local_url}
-            log(f"使用代理：{proxy_cfg['server']}（带认证，经本地中继 {relay.local_url}）")
-            exit_ip = relay.exit_ip()
-            if exit_ip:
-                geoip = exit_ip
-                log(f"代理出口 IP：{exit_ip}")
-            else:
-                log("查不到代理出口 IP，交给 camoufox 自行探测。")
-        else:
-            kwargs["proxy"] = proxy_cfg
-            log(f"使用代理：{proxy_cfg['server']}")
-    return kwargs, relay, geoip
+        # 中继起不来是代理的问题，得当场说清楚。漏到浏览器启动的兜底提示里
+        # 会变成「请先安装浏览器」，把人往完全无关的方向带。
+        try:
+            relay = SocksRelay(
+                normalize_proxy_url(proxy),
+                on_error=_relay_log,
+                max_upstream=max_upstream,
+            ).start()
+        except Exception as exc:
+            raise RuntimeError(
+                f"启动本地代理中继失败（{exc}）。请检查代理地址 "
+                f"{proxy_cfg['server']} 是否可达。"
+            ) from exc
+        options = {"server": relay.local_url}
+        lookup_via = relay.local_url
+        log(f"使用代理：{proxy_cfg['server']}（带认证，经本地中继 {relay.local_url}）")
+        exit_ip = relay.exit_ip()
+        if exit_ip:
+            log(f"代理出口 IP：{exit_ip}")
+    else:
+        options = proxy_cfg
+        lookup_via = normalize_proxy_url(proxy)
+        log(f"使用代理：{proxy_cfg['server']}")
+    timezone = lookup_timezone(lookup_via)
+    if timezone:
+        log(f"浏览器时区对齐代理出口：{timezone}")
+    else:
+        log("查不到代理出口时区，沿用系统时区。")
+    return options, relay, timezone
+
+
+# Playwright 默认会带 --enable-automation：navigator.webdriver=true，Cloudflare 一眼识破。
+CHROMIUM_IGNORE_DEFAULT_ARGS = ["--enable-automation"]
+CHROMIUM_WINDOW = (1280, 900)
+
+
+def chromium_args(*, display: str | None, proxied: bool) -> list[str]:
+    width, height = CHROMIUM_WINDOW
+    args = [
+        # 去掉 Blink 层的自动化特征（同样会暴露 navigator.webdriver）。
+        "--disable-blink-features=AutomationControlled",
+        f"--window-size={width},{height}",
+        # 语言用启动参数 + 进程环境定（见 launch_chromium），而不是 context 级的
+        # locale 模拟：后者把 Accept-Language 压成单值 "en-US"，真 Chrome 是
+        # "en-US,en;q=0.9"。
+        "--lang=en-US",
+        "--accept-lang=en-US,en",
+        # 容器默认 /dev/shm 只有 64MB，大页面会让渲染进程崩溃。
+        "--disable-dev-shm-usage",
+    ]
+    if display:
+        # 挂到指定 X 显示：强制 X11 后端并固定缩放，避免开发机上的 Wayland 会话
+        # 把窗口开到真实桌面、或按宿主 DPI 缩放屏幕尺寸。
+        args += ["--ozone-platform=x11", "--force-device-scale-factor=1"]
+    if proxied:
+        # WebRTC 的 UDP 不走代理，会把服务器真实 IP 暴露给页面脚本。
+        args.append("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+    return args
+
+
+class ChromiumSession:
+    """一个 Playwright + Chromium 实例；close() 负责全部收尾。
+
+    Playwright Sync API 绑定创建它的线程，close() 必须在同一线程调用。
+    """
+
+    def __init__(self, playwright, browser):
+        self._playwright = playwright
+        self.browser = browser
+
+    def close(self) -> None:
+        try:
+            self.browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self._playwright.stop()
+
+
+def launch_chromium(*, headless: bool, proxy: dict | None = None,
+                    display: str | None = None, timezone: str | None = None) -> ChromiumSession:
+    """启动 Playwright 自带的 Chromium（channel=chromium：完整版，而非 headless shell）。"""
+    env = dict(os.environ)
+    # Linux 上 Chromium 的界面/Intl 语言取自环境变量，--lang 管不到。
+    env.update(LANG="en_US.UTF-8", LANGUAGE="en_US:en")
+    if display:
+        env["DISPLAY"] = display
+        env.pop("WAYLAND_DISPLAY", None)
+    if timezone:
+        # 用进程级 TZ 而不是 CDP 时区模拟：与系统时区行为完全一致，不留模拟痕迹。
+        env["TZ"] = timezone
+    playwright = sync_playwright().start()
+    try:
+        options: dict = {
+            "channel": "chromium",
+            "headless": headless,
+            "args": chromium_args(display=display, proxied=proxy is not None),
+            "ignore_default_args": CHROMIUM_IGNORE_DEFAULT_ARGS,
+            "env": env,
+        }
+        if proxy is not None:
+            options["proxy"] = proxy
+        browser = playwright.chromium.launch(**options)
+    except Exception:
+        playwright.stop()
+        raise
+    return ChromiumSession(playwright, browser)
+
+
+BROWSER_INSTALL_HINT = "请先运行 `uv run playwright install chromium` 下载浏览器"
 
 
 @contextmanager
 def browser_session(proxy: str | None = None):
-    """启动 Camoufox（Firefox 系隐身浏览器）会话。
+    """启动 Chromium 会话，yield Playwright Browser。
 
-    headless 档位由 pick_headless() 按平台自动选：Linux 容器走 "virtual"（Xvfb），
-    Windows/macOS 走 False（桌面真显示器）。两者都比真 headless 更抗 Cloudflare 检测。
-    humanize 提供人性化光标移动；locale/geoip 让指纹统一
-    （配了代理时 geoip 按代理出口 IP 匹配时区/地理指纹）。
+    headless 档位由 pick_headless() 按平台自动选：Linux 容器走 "virtual"（自管 Xvfb +
+    有头模式），Windows/macOS 走 False（桌面真显示器）。两者都比真 headless 更抗
+    Cloudflare 检测。配了代理时浏览器时区对齐代理出口 IP。
 
     带认证的 SOCKS5 会先在本地拉起一个免认证中继（见 socks_relay），
     浏览器只连 127.0.0.1，凭据由中继负责递给上游。
     """
-    kwargs, relay, geoip = build_camoufox_kwargs(proxy)
+    proxy_options, relay, timezone = build_proxy_options(proxy)
     headless = pick_headless()
-    cm = Camoufox(
-        headless=headless,
-        humanize=True,
-        locale="en-US",
-        geoip=geoip,
-        window=(1280, 900),
-        **kwargs,
-    )
-    # 真正的启动发生在 __enter__（拉起 Firefox / Xvfb），构造函数不会抛——所以只包
-    # __enter__ 才能拦到「没 fetch 二进制」「缺 Xvfb」这类启动失败，并给出可操作的提示。
-    # 不能用 `with` 把 yield 也裹进 try，否则调用方 body 里的页面异常会被误报成启动失败。
+    display = None
+    # 只包启动这一段：不能用 `with` 把 yield 也裹进 try，否则调用方 body 里的
+    # 页面异常会被误报成启动失败。
     try:
-        browser = cm.__enter__()
+        if headless == "virtual":
+            display = VirtualDisplay().start()
+        session = launch_chromium(
+            headless=headless is True,
+            proxy=proxy_options,
+            display=display.name if display else None,
+            timezone=timezone,
+        )
     except Exception as exc:
+        if display is not None:
+            display.stop()
         if relay is not None:
             relay.stop()
-        # Xvfb 只在真的走 virtual 时才相关。Windows 上装 Xvfb 没有任何用——
-        # camoufox.exe 不走 X11——这句提示会把人往完全错的方向带。
+        # Xvfb 只在真的走 virtual 时才相关。Windows 上装 Xvfb 没有任何用，
+        # 这句提示会把人往完全错的方向带。
         extra = "，并确认已安装 Xvfb" if headless == "virtual" else ""
         raise RuntimeError(
-            f"启动 Camoufox 失败（{exc}）。请先运行 `uv run camoufox fetch` "
-            f"下载浏览器二进制{extra}。"
+            f"启动 Chromium 失败（{exc}）。{BROWSER_INSTALL_HINT}{extra}。"
         ) from exc
-    log(f"已启动 Camoufox（headless={headless}）")
+    log(f"已启动 Chromium（headless={headless}）")
     try:
-        yield browser
+        yield session.browser
     finally:
-        cm.__exit__(None, None, None)
+        session.close()
+        if display is not None:
+            display.stop()
         if relay is not None:
             relay.stop()
+
+
+def new_context(browser):
+    """统一的浏览器上下文：窗口尺寸即视口（no_viewport）；语言在启动层定好了。"""
+    return browser.new_context(no_viewport=True)
 
 
 def new_page(browser):
-    context = browser.new_context(
-        no_viewport=True,
-    )
+    context = new_context(browser)
     page = context.new_page()
     page.set_default_timeout(30_000)
     return context, page
@@ -313,12 +435,59 @@ def open_magic_link(page: Page, link: str) -> bool:
     return True
 
 
+def cloudflare_challenge_visible(page: Page) -> bool:
+    """当前是否停在 Cloudflare 托管挑战页（"Just a moment..."）。"""
+    try:
+        return "just a moment" in page.title().lower()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def click_turnstile(page: Page) -> bool:
+    """挑战页出现「Verify you are human」勾选框时，用拟人的鼠标轨迹点一下。
+
+    出口 IP 风险较高时 Cloudflare 不会自动放行，而是要求勾选；无人值守的注册流程
+    不点就会一直卡着。勾选框在 challenges.cloudflare.com 的 iframe 里，按 iframe
+    在页面上的位置点它左侧的复选框。返回是否真的点了。
+    """
+    for frame in page.frames:
+        if "challenges.cloudflare.com" not in (frame.url or ""):
+            continue
+        try:
+            box = frame.frame_element().bounding_box()
+        except Exception:  # noqa: BLE001
+            continue
+        # 隐形挑战的 iframe 尺寸为 0，没有可点的东西。
+        if not box or box["width"] < 100 or box["height"] < 40:
+            continue
+        x = box["x"] + 28 + random.uniform(-4, 4)
+        y = box["y"] + box["height"] / 2 + random.uniform(-4, 4)
+        try:
+            page.mouse.move(x - random.uniform(60, 160), y + random.uniform(-60, 60))
+            page.mouse.move(x, y, steps=random.randint(12, 24))
+            page.mouse.click(x, y, delay=random.randint(50, 130))
+        except Exception:  # noqa: BLE001
+            return False
+        return True
+    return False
+
+
+# 挑战页停留这么久仍未放行才尝试勾选，之后每隔这么久重试一次。
+_TURNSTILE_FIRST_CLICK_MS = 6_000
+_TURNSTILE_RETRY_MS = 15_000
+
+
 def wait_login_form(page: Page, timeout_ms: int = 120_000) -> None:
-    """等邮箱输入框出现；Cloudflare 验证期间轮询并打印状态。"""
+    """等邮箱输入框出现；Cloudflare 验证期间轮询并打印状态，必要时勾选验证框。"""
     email_box = page.get_by_placeholder("Enter your email")
     step = 3_000
     waited = 0
+    next_click = _TURNSTILE_FIRST_CLICK_MS
     while waited < timeout_ms:
+        if waited >= next_click and cloudflare_challenge_visible(page):
+            next_click = waited + _TURNSTILE_RETRY_MS
+            if click_turnstile(page):
+                log("Cloudflare 要求人机验证，已自动勾选验证框。")
         try:
             if email_box.is_visible():
                 log("登录表单已出现。")

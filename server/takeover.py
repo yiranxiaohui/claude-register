@@ -1,7 +1,7 @@
 """接管会话：注入 sessionKey 的已登录 claude.ai 浏览器 + Xpra，供网页接管。
 
-与注册流程（server/runner.py）平级、各用各的屏：注册走 Camoufox 的 "virtual"
-自选屏，接管用 Xpra start-desktop 管理独立的 :100 虚拟桌面，并直接提供 HTML5
+与注册流程（server/runner.py）平级、各用各的屏：注册自管 :110 起的 Xvfb
+（claude_register/display.py），接管用 Xpra start-desktop 管理独立的 :100 虚拟桌面，并直接提供 HTML5
 客户端和 WebSocket 传输。Xpra 客户端支持自动重连和双向系统剪贴板同步。
 单例：同一时刻只允许一个接管会话。
 

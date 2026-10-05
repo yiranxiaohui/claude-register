@@ -2,15 +2,14 @@
 
 为什么需要它：接管用 `xpra start-desktop` + `--resize-display`，Xpra 会把 Xvfb
 根窗口缩放到网页客户端的画布尺寸（随浏览器窗口变化）。但桌面里没有窗口管理器，
-Camoufox 按启动参数 `window=(1280, 900)` 开出窗口后就再没人去调它：画布比它宽时
+Chromium 按启动参数 `--window-size=1280,900` 开出窗口后就再没人去调它：画布比它宽时
 右侧一片黑，比它矮时底部（输入框）被裁掉。
 
 实测把 X 窗口调到桌面尺寸后，innerWidth/innerHeight、visualViewport 与 CSS
-媒体查询都随真实尺寸变化，页面按新视口正常排版；只有 outerWidth/outerHeight
-仍是 Camoufox 伪造的启动值——接管是人工操作已登录会话，可以接受。
+媒体查询都随真实尺寸变化，页面按新视口正常排版。
 
 实现取最简单可靠的轮询：每隔 POLL_INTERVAL 看一眼根窗口尺寸和顶层窗口，
-不一致就 configure。新开窗口、客户端调尺寸、Firefox 自己改尺寸都能收敛，
+不一致就 configure。新开窗口、客户端调尺寸、浏览器自己改尺寸都能收敛，
 且没有事件订阅/事件循环要维护。
 """
 from __future__ import annotations
@@ -26,8 +25,11 @@ POLL_INTERVAL = 0.3
 XVFB_MAX = (8192, 4096)
 # 单窗口尺寸上限：超大屏也够用，防止异常尺寸把渲染内存撑爆。
 MAX_FIT = (3840, 2160)
-# Firefox/Camoufox 浏览器主窗口的 WM_CLASS instance。
-BROWSER_INSTANCE = "Navigator"
+# Chromium 浏览器窗口的 WM_CLASS class（不区分大小写）。instance 会带上
+# user-data-dir（如 "chromium-browser (/tmp/playwright_chromiumdev_profile-xxx)"），
+# 每次启动都不同，所以按 class 认。另有一个 class 为 "Chrome" 的 10x10 组长窗口，
+# 它从不映射，靠 viewable 过滤即可。
+BROWSER_CLASSES = frozenset({"chromium-browser", "chromium", "chrome", "google-chrome"})
 
 
 @dataclass(frozen=True)
@@ -35,13 +37,17 @@ class TopLevel:
     """顶层窗口快照（与 Xlib 解耦，便于纯函数测试）。"""
 
     id: int
-    instance: str
+    wm_class: str
     viewable: bool
     override_redirect: bool
     x: int
     y: int
     width: int
     height: int
+
+
+def is_browser_window(win: TopLevel) -> bool:
+    return win.wm_class.lower() in BROWSER_CLASSES
 
 
 def fit_size(root: tuple[int, int]) -> tuple[int, int] | None:
@@ -63,7 +69,7 @@ def plan_fit(root: tuple[int, int], windows) -> list[tuple[int, tuple[int, int]]
         return []
     plan = []
     for win in windows:
-        if not win.viewable or win.override_redirect or win.instance != BROWSER_INSTANCE:
+        if not win.viewable or win.override_redirect or not is_browser_window(win):
             continue
         if (win.x, win.y, win.width, win.height) == (0, 0, *target):
             continue
@@ -141,7 +147,7 @@ class WindowFitter:
             except (xerror.BadWindow, xerror.BadDrawable):
                 continue  # 窗口在枚举与查询之间被销毁
             windows.append(TopLevel(
-                id=child.id, instance=cls[0], viewable=True,
+                id=child.id, wm_class=cls[1], viewable=True,
                 override_redirect=bool(attrs.override_redirect),
                 x=g.x, y=g.y, width=g.width, height=g.height,
             ))

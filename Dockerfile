@@ -6,36 +6,12 @@ RUN bun install
 COPY web/ ./
 RUN bun run build
 
-# 2) 运行镜像（含 Python + Xvfb + Camoufox）
+# 2) 运行镜像（含 Python + Xvfb + Playwright Chromium）
 FROM python:3.13-slim
-# Camoufox 自带 Firefox 二进制，但仍动态链接标准 Firefox 系统库；slim 镜像里没有这些库，
-# 缺一个都要到容器运行时才暴露。下面是 Firefox 运行时依赖的规范集合（含 Xvfb 虚拟显示）。
-# 注意：较新的 Debian 基础镜像（trixie/13 起）ALSA 包可能改名为 libasound2t64，若构建报
-# 找不到 libasound2，把它换成 libasound2t64 即可。
+# Chromium 自身的系统依赖由下面的 `playwright install --with-deps` 按官方清单安装；
+# 这里只装 Xvfb（注册/接管的虚拟显示）、字体和面板运行所需的服务。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
-    libgtk-3-0 \
-    libx11-xcb1 \
-    libasound2 \
-    libdbus-glib-1-2 \
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libxshmfence1 \
-    libxext6 \
-    libxrender1 \
-    libxtst6 \
-    libxi6 \
     fonts-liberation \
     fonts-unifont \
     nginx \
@@ -62,6 +38,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 # 此时源码还没拷入，只装第三方依赖；项目本体（hatchling 构建需要 README.md/源码）留到下面装
 RUN uv sync --frozen --no-dev --no-install-project
+# Playwright 自带的 Chromium（完整版，不装 headless shell：注册与接管都以有头模式
+# 挂在 Xvfb 上）。版本由 uv.lock 锁定的 playwright 决定，放在拷源码之前以复用缓存。
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN uv run --no-sync playwright install --with-deps --no-shell chromium && \
+    rm -rf /var/lib/apt/lists/*
 COPY claude_register/ ./claude_register/
 COPY server/ ./server/
 COPY serve.py main.py README.md ./
@@ -70,11 +51,6 @@ COPY deploy/supervisord.conf /etc/supervisor/conf.d/claude-register.conf
 RUN nginx -t
 RUN uv sync --frozen --no-dev
 COPY --from=web /web/dist ./web/dist
-# 浏览器版本固定（见 deploy/fetch_camoufox.py）：直接 `camoufox fetch` 会装上
-# 与锁定 Python 包不兼容的最新版，导致浏览器启动失败。
-ARG CAMOUFOX_VERSION=152.0.4-beta.30
-COPY deploy/fetch_camoufox.py /tmp/fetch_camoufox.py
-RUN CAMOUFOX_VERSION=$CAMOUFOX_VERSION uv run python /tmp/fetch_camoufox.py && rm /tmp/fetch_camoufox.py
 ENV CLAUDE_REGISTER_INTERNAL_PORT=8791
 EXPOSE 8790
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/claude-register.conf"]

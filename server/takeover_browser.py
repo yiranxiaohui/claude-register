@@ -1,6 +1,6 @@
-"""接管会话的真实副作用实现：等 X socket 就绪、开注入 Cookie 的 Camoufox。
+"""接管会话的真实副作用实现：等 X socket 就绪、开注入 Cookie 的 Chromium。
 
-与 server/takeover.py 分开，好让 TakeoverManager 单测完全不碰 Camoufox / 文件系统。
+与 server/takeover.py 分开，好让 TakeoverManager 单测完全不碰浏览器 / 文件系统。
 """
 from __future__ import annotations
 
@@ -8,16 +8,17 @@ import os
 import socket
 import time
 
-from camoufox.sync_api import Camoufox
-
 from claude_register.anymail import AnyMailClient
 from claude_register.browser import (
+    BROWSER_INSTALL_HINT,
     URL as LOGIN_URL,
-    build_camoufox_kwargs,
+    build_proxy_options,
     extract_session_key,
     fill_code,
     fill_email,
     hcaptcha_visible,
+    launch_chromium,
+    new_context,
     open_login,
     open_magic_link,
     wait_code_screen,
@@ -75,8 +76,8 @@ def wait_tcp_port(host: str, port: int, timeout: float = 10.0,
 
 
 class _BrowserHandle:
-    def __init__(self, cm, relay, page):
-        self._cm = cm
+    def __init__(self, session, relay, page):
+        self._session = session
         self._relay = relay
         self._page = page
 
@@ -102,7 +103,7 @@ class _BrowserHandle:
         try:
             page.context.clear_cookies(name="sessionKey")
         except TypeError:
-            # 兼容不支持按 name 清理的旧 Playwright/Camoufox 版本。
+            # 兼容不支持按 name 清理的旧 Playwright 版本。
             page.context.clear_cookies()
 
         log(f"接管浏览器开始为 {email} 重新自动登录。")
@@ -154,7 +155,7 @@ class _BrowserHandle:
 
     def close(self):
         try:
-            self._cm.__exit__(None, None, None)
+            self._session.close()
         finally:
             if self._relay is not None:
                 self._relay.stop()
@@ -173,40 +174,37 @@ def _prefill_login_email(page, email: str) -> None:
 
 def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = ":100",
                           login_email: str = ""):
-    """开一个 claude.ai 的 Camoufox（挂在指定 X display 上），返回带 .close() 的句柄。
+    """开一个 claude.ai 的 Chromium（挂在指定 X display 上），返回带 .close() 的句柄。
 
     有 session_key 时注入 Cookie 打开已登录首页；为空时是「手动登录」模式：
     直接打开登录页（可选预填邮箱），由用户在接管画面里完成登录。
     """
-    kwargs, relay, geoip = build_camoufox_kwargs(
+    proxy_options, relay, timezone = build_proxy_options(
         proxy or None, max_upstream=takeover_max_upstream()
     )
-    cm = Camoufox(
-        headless=False,
-        humanize=True,
-        locale="en-US",
-        geoip=geoip,
-        window=(1280, 900),
-        virtual_display=display,  # 挂到我们自管的 Xvfb :100，同时保留完整 os.environ
-        **kwargs,
-    )
     try:
-        browser = cm.__enter__()
+        session = launch_chromium(
+            headless=False,
+            proxy=proxy_options,
+            display=display,  # 挂到 Xpra 管理的 :100 虚拟桌面
+            timezone=timezone,
+        )
     except Exception as exc:
         if relay is not None:
             relay.stop()
         raise RuntimeError(
-            f"启动接管浏览器失败（{exc}）。请确认已 `uv run camoufox fetch` 且 Xvfb 可用。"
+            f"启动接管浏览器失败（{exc}）。{BROWSER_INSTALL_HINT}，并确认 Xvfb 可用。"
         ) from exc
+    browser = session.browser
     try:
-        context = browser.new_context(no_viewport=True)
+        context = new_context(browser)
         if not session_key:
             page = context.new_page()
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
             log("手动登录浏览器已打开 claude.ai 登录页。")
             if login_email:
                 _prefill_login_email(page, login_email)
-            return _BrowserHandle(cm, relay, page)
+            return _BrowserHandle(session, relay, page)
         context.add_cookies([{
             "name": "sessionKey",
             "value": session_key,
@@ -219,8 +217,8 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
         page.goto("https://claude.ai", wait_until="domcontentloaded", timeout=60_000)
         log("接管浏览器已注入 sessionKey 并打开 claude.ai。")
     except Exception as exc:
-        cm.__exit__(None, None, None)
+        session.close()
         if relay is not None:
             relay.stop()
         raise RuntimeError(f"注入 sessionKey / 打开 claude.ai 失败（{exc}）。") from exc
-    return _BrowserHandle(cm, relay, page)
+    return _BrowserHandle(session, relay, page)
