@@ -74,6 +74,7 @@ def test_takeover_browser_uses_wide_relay_and_display(monkeypatch):
 
         def goto(self, url, **kwargs):
             seen["url"] = url
+            seen["goto"] = kwargs
 
         def close(self):
             self.closed = True
@@ -98,6 +99,41 @@ def test_takeover_browser_uses_wide_relay_and_display(monkeypatch):
     assert seen["context"] == {"no_viewport": True}
     assert seen["cookies"][0]["name"] == "sessionKey"
     assert seen["url"] == "https://claude.ai"
+    # 只等首个响应，不等 DOMContentLoaded：assets 经代理卡住时接管也不能失败。
+    assert seen["goto"]["wait_until"] == "commit"
+    assert seen["goto"]["timeout"] == takeover_browser.TAKEOVER_NAV_TIMEOUT_MS
+    handle.close()
+
+
+def test_manual_takeover_does_not_wait_for_domcontentloaded(monkeypatch):
+    seen = {}
+
+    class Session:
+        def __init__(self):
+            self.browser = self
+
+        def new_context(self, **kwargs):
+            return self
+
+        def add_cookies(self, cookies):
+            raise AssertionError("手动登录模式不注入 Cookie")
+
+        def new_page(self):
+            return self
+
+        def goto(self, url, **kwargs):
+            seen["url"] = url
+            seen["goto"] = kwargs
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(takeover_browser, "launch_chromium", lambda **kw: Session())
+
+    handle = takeover_browser.open_takeover_browser(session_key="", proxy="", display=":100")
+
+    assert seen["url"] == takeover_browser.LOGIN_URL
+    assert seen["goto"]["wait_until"] == "commit"
     handle.close()
 
 
