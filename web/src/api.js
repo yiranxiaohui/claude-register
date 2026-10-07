@@ -76,6 +76,20 @@ export const api = {
 
   rotateApiKey: () => fetch("/api/api-key", { method: "POST" }).then(j),
 
+  accountCreate: (fields) =>
+    fetch("/api/accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fields),
+    }).then(j),
+
+  accountsBatchDelete: (emails) =>
+    fetch("/api/accounts/batch-delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ emails }),
+    }).then(j),
+
   accountUpdate: (email, fields) =>
     fetch(`/api/accounts/${encodeURIComponent(email)}`, {
       method: "PATCH",

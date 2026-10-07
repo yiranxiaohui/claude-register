@@ -157,6 +157,47 @@ ACCOUNT_EDITABLE_FIELDS = (
 )
 
 
+class AccountExists(Exception):
+    """新建 / 改名时目标邮箱已被其他账号占用。"""
+
+
+def create_account(conn, email, fields: dict, *, created_at: str,
+                   status: str = "success") -> dict:
+    """面板手动新增一个账号；邮箱已存在抛 AccountExists，不覆盖已有数据。"""
+    vals = {k: str(fields.get(k) or "") for k in ACCOUNT_EDITABLE_FIELDS}
+    cols = ("email", "domain", "created_at", "expires_at", "mailbox_id", "status",
+            *vals.keys())
+    params = (email, email.split("@", 1)[-1], created_at, "", "", status, *vals.values())
+    try:
+        conn.execute(
+            f"INSERT INTO accounts({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
+            params,
+        )
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise AccountExists(email) from None
+    conn.commit()
+    return get_account(conn, email)
+
+
+def rename_account(conn, old_email, new_email) -> bool:
+    """修改账号邮箱（同时更新 domain）；目标已被占用抛 AccountExists。"""
+    if old_email == new_email:
+        return get_account(conn, old_email) is not None
+    if get_account(conn, new_email) is not None:
+        raise AccountExists(new_email)
+    try:
+        cur = conn.execute(
+            "UPDATE accounts SET email=?, domain=? WHERE email=?",
+            (new_email, new_email.split("@", 1)[-1], old_email),
+        )
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise AccountExists(new_email) from None
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def update_account_fields(conn, email, fields: dict) -> bool:
     """仅更新 ACCOUNT_EDITABLE_FIELDS 里的字段，返回是否有行被更新。"""
     sets = {k: str(v or "") for k, v in fields.items() if k in ACCOUNT_EDITABLE_FIELDS}
@@ -239,3 +280,19 @@ def delete_account(conn, email) -> bool:
     cur = conn.execute("DELETE FROM accounts WHERE email=?", (email,))
     conn.commit()
     return cur.rowcount > 0
+
+
+def delete_accounts(conn, emails) -> int:
+    """批量删除，返回实际删除的行数；不存在的邮箱忽略。"""
+    emails = list(dict.fromkeys(emails))
+    if not emails:
+        return 0
+    deleted = 0
+    for i in range(0, len(emails), 500):  # 避开 SQLite 变量个数上限
+        chunk = emails[i:i + 500]
+        cur = conn.execute(
+            f"DELETE FROM accounts WHERE email IN ({','.join('?' * len(chunk))})", chunk,
+        )
+        deleted += cur.rowcount
+    conn.commit()
+    return deleted

@@ -1,16 +1,20 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Download, LogIn, Upload } from "lucide-react";
+import { Download, LogIn, Plus, Search, Trash2, Upload } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/status-badge";
 import { ExportDialog } from "@/components/export-dialog";
 import { ImportDialog } from "@/components/import-dialog";
 import { ManualLoginDialog } from "@/components/manual-login-dialog";
+import {
+  AccountCreateDialog,
+  AccountFields,
+  emptyAccountForm,
+} from "@/components/account-create-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -24,12 +28,41 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-const EDIT_FIELDS = [
-  ["display_name", "备注", "给账号起个名字", false],
-  ["password", "密码", "登录密码", false],
-  ["session_key", "sessionKey", "sk-ant-sid01-…", true],
-  ["proxy", "代理", "socks5://user:pass@host:port", true],
+const FILTERS = [
+  ["all", "全部"],
+  ["alive", "有效"],
+  ["dead", "失效"],
+  ["blocked", "被拦截"],
+  ["unchecked", "未检测"],
+  ["claimed", "已获取"],
+  ["unclaimed", "未获取"],
+  ["no_sk", "无 sessionKey"],
 ];
+
+function matchFilter(a, filter) {
+  switch (filter) {
+    case "alive":
+    case "dead":
+    case "blocked":
+      return a.check_status === filter;
+    case "unchecked":
+      return !a.check_status;
+    case "claimed":
+      return !!a.claimed_at;
+    case "unclaimed":
+      return !a.claimed_at;
+    case "no_sk":
+      return !a.session_key;
+    default:
+      return true;
+  }
+}
+
+function matchQuery(a, q) {
+  if (!q) return true;
+  return [a.email, a.display_name, a.proxy, a.session_key]
+    .some((v) => String(v || "").toLowerCase().includes(q));
+}
 
 const LIVE_LABEL = { alive: "有效", dead: "失效", blocked: "被拦截", error: "检测失败" };
 const LIVE_CLS = {
@@ -78,7 +111,45 @@ export default function Accounts({ attach, running, navigate }) {
   const [copiedEmail, setCopiedEmail] = useState("");
   const [editingEmail, setEditingEmail] = useState("");
   const [editForm, setEditForm] = useState({});
-  const [deleteTarget, setDeleteTarget] = useState("");
+  // 待删除的邮箱列表；单个删除也走数组，空数组表示没有待确认的删除
+  const [deleteTargets, setDeleteTargets] = useState([]);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [selected, setSelected] = useState(() => new Set());
+  const [saving, setSaving] = useState(false);
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return accounts.filter((a) => matchFilter(a, filter) && matchQuery(a, q));
+  }, [accounts, query, filter]);
+  const selectedVisible = visible.filter((a) => selected.has(a.email));
+  const allVisibleSelected = visible.length > 0 && selectedVisible.length === visible.length;
+
+  // 列表刷新后剔除已经不存在的选中项
+  useEffect(() => {
+    setSelected((prev) => {
+      const alive = new Set(accounts.map((a) => a.email));
+      const next = new Set([...prev].filter((e) => alive.has(e)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [accounts]);
+
+  const toggleSelect = (email) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(email)) next.delete(email);
+      else next.add(email);
+      return next;
+    });
+
+  const toggleSelectAll = () =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) visible.forEach((a) => next.delete(a.email));
+      else visible.forEach((a) => next.add(a.email));
+      return next;
+    });
 
   function refreshLists() {
     api.listAccounts().then(setAccounts).catch(() => {});
@@ -257,22 +328,32 @@ export default function Accounts({ attach, running, navigate }) {
 
   const startEdit = (a) => {
     setEditingEmail(a.email);
-    setEditForm({
-      display_name: a.display_name || "",
-      password: a.password || "",
-      session_key: a.session_key || "",
-      proxy: a.proxy || "",
-    });
+    const base = emptyAccountForm();
+    setEditForm(Object.fromEntries(Object.keys(base).map((k) => [k, a[k] || ""])));
   };
 
   const saveEdit = async () => {
+    if (!String(editForm.email || "").trim()) return toast.error("邮箱不能为空");
+    setSaving(true);
     try {
-      await api.accountUpdate(editingEmail, editForm);
+      const row = await api.accountUpdate(editingEmail, editForm);
+      if (row.email !== editingEmail) {
+        setSelected((prev) => {
+          if (!prev.has(editingEmail)) return prev;
+          const next = new Set(prev);
+          next.delete(editingEmail);
+          next.add(row.email);
+          return next;
+        });
+      }
       setEditingEmail("");
       refreshLists();
       toast.success("已保存");
     } catch (e) {
-      toast.error(`保存失败（${e.status || "?"}）`);
+      if (e?.status === 401) return;
+      toast.error(e.body?.detail || `保存失败（${e.status || "?"}）`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -290,15 +371,27 @@ export default function Accounts({ attach, running, navigate }) {
   };
 
   const confirmDelete = async () => {
-    const email = deleteTarget;
-    setDeleteTarget("");
+    const emails = deleteTargets;
+    setDeleteTargets([]);
     try {
-      await api.accountDelete(email);
-      setEditingEmail("");
+      if (emails.length === 1) {
+        await api.accountDelete(emails[0]);
+        toast.success(`已删除 ${emails[0]}`);
+      } else {
+        const res = await api.accountsBatchDelete(emails);
+        toast.success(`已删除 ${res.deleted} 个账号`);
+      }
+      if (emails.includes(editingEmail)) setEditingEmail("");
+      setSelected((prev) => {
+        const next = new Set(prev);
+        emails.forEach((e) => next.delete(e));
+        return next;
+      });
       refreshLists();
-      toast.success(`已删除 ${email}`);
     } catch (e) {
-      toast.error(`删除失败（${e.status || "?"}）`);
+      if (e?.status === 401) return;
+      toast.error(e.body?.detail || `删除失败（${e.status || "?"}）`);
+      refreshLists();
     }
   };
 
@@ -308,6 +401,9 @@ export default function Accounts({ attach, running, navigate }) {
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle>账号列表</CardTitle>
           <span className="flex gap-1.5">
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus /> 新增账号
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -376,18 +472,75 @@ export default function Accounts({ attach, running, navigate }) {
               </AlertDescription>
             </Alert>
           )}
+          {accounts.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative min-w-48 flex-1">
+                <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  className="pl-8"
+                  value={query}
+                  placeholder="搜索邮箱 / 备注 / 代理 / sessionKey"
+                  spellCheck={false}
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+              </div>
+              <select
+                className="h-9 rounded-md border bg-background px-2 text-sm"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              >
+                {FILTERS.map(([v, label]) => (
+                  <option key={v} value={v}>{label}</option>
+                ))}
+              </select>
+              <label className="flex h-9 cursor-pointer items-center gap-2 px-1 text-sm text-muted-foreground select-none">
+                <input
+                  type="checkbox"
+                  className="size-4 accent-primary"
+                  checked={allVisibleSelected}
+                  disabled={visible.length === 0}
+                  onChange={toggleSelectAll}
+                />
+                全选
+              </label>
+              <span className="text-xs text-muted-foreground">
+                {visible.length === accounts.length
+                  ? `共 ${accounts.length} 个`
+                  : `显示 ${visible.length} / ${accounts.length} 个`}
+                {selectedVisible.length > 0 ? `，已选 ${selectedVisible.length} 个` : ""}
+              </span>
+              {selectedVisible.length > 0 && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setDeleteTargets(selectedVisible.map((a) => a.email))}
+                >
+                  <Trash2 /> 删除所选（{selectedVisible.length}）
+                </Button>
+              )}
+            </div>
+          )}
           {accounts.length === 0 ? (
-            <div className="text-sm text-muted-foreground">暂无账号</div>
+            <div className="text-sm text-muted-foreground">暂无账号，可点「新增账号」手动录入</div>
+          ) : visible.length === 0 ? (
+            <div className="text-sm text-muted-foreground">没有符合条件的账号</div>
           ) : (
             <ul className="flex flex-col gap-1.5">
-              {accounts.map((a) => (
+              {visible.map((a) => (
                 <li key={a.email} className="flex flex-col">
                   <div
                     className={`flex items-center justify-between gap-2 rounded-lg border bg-background/50 px-3 py-2.5 text-sm ${
                       editingEmail === a.email ? "rounded-b-none border-ring" : ""
-                    }`}
+                    } ${selected.has(a.email) ? "border-primary/60" : ""}`}
                   >
-                    <span className="flex min-w-0 flex-col gap-1 overflow-hidden">
+                    <input
+                      type="checkbox"
+                      className="size-4 shrink-0 accent-primary"
+                      aria-label={`选择 ${a.email}`}
+                      checked={selected.has(a.email)}
+                      onChange={() => toggleSelect(a.email)}
+                    />
+                    <span className="flex min-w-0 flex-1 flex-col gap-1 overflow-hidden">
                       <span className="truncate" title={a.email}>
                         {a.email}
                       </span>
@@ -460,34 +613,29 @@ export default function Accounts({ attach, running, navigate }) {
                           接管
                         </Button>
                       )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-red-400 hover:text-red-300"
+                        title="删除账号"
+                        aria-label={`删除 ${a.email}`}
+                        onClick={() => setDeleteTargets([a.email])}
+                      >
+                        <Trash2 />
+                      </Button>
                     </span>
                   </div>
                   {editingEmail === a.email && (
                     <div className="flex flex-col gap-3 rounded-b-lg border border-t-0 border-ring bg-background/50 p-3.5">
-                      <div className="grid grid-cols-2 gap-2.5">
-                        {EDIT_FIELDS.map(([key, label, hint, wide]) => (
-                          <div
-                            key={key}
-                            className={`flex min-w-0 flex-col gap-1 ${wide ? "col-span-2" : ""}`}
-                          >
-                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                              {label}
-                            </Label>
-                            <Input
-                              className={wide ? "font-mono text-xs" : ""}
-                              value={editForm[key] ?? ""}
-                              placeholder={hint}
-                              spellCheck={false}
-                              onChange={(e) =>
-                                setEditForm((f) => ({ ...f, [key]: e.target.value }))
-                              }
-                            />
-                          </div>
-                        ))}
-                      </div>
+                      <AccountFields
+                        form={editForm}
+                        setForm={setEditForm}
+                        disabled={saving}
+                        idPrefix={`edit-${a.email}`}
+                      />
                       <div className="flex items-center gap-2">
-                        <Button size="sm" onClick={saveEdit}>
-                          保存
+                        <Button size="sm" onClick={saveEdit} disabled={saving}>
+                          {saving ? "保存中…" : "保存"}
                         </Button>
                         <Button variant="outline" size="sm" onClick={() => setEditingEmail("")}>
                           取消
@@ -499,7 +647,7 @@ export default function Accounts({ attach, running, navigate }) {
                         <Button
                           variant="destructive"
                           size="sm"
-                          onClick={() => setDeleteTarget(a.email)}
+                          onClick={() => setDeleteTargets([a.email])}
                         >
                           删除账号
                         </Button>
@@ -513,12 +661,17 @@ export default function Accounts({ attach, running, navigate }) {
         </CardContent>
       </Card>
 
-      <AlertDialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget("")}>
+      <AlertDialog
+        open={deleteTargets.length > 0}
+        onOpenChange={(o) => !o && setDeleteTargets([])}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>删除账号？</AlertDialogTitle>
             <AlertDialogDescription>
-              确认删除账号 {deleteTarget}？此操作不可恢复。
+              {deleteTargets.length === 1
+                ? `确认删除账号 ${deleteTargets[0]}？此操作不可恢复。`
+                : `确认删除所选的 ${deleteTargets.length} 个账号？此操作不可恢复。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -533,6 +686,7 @@ export default function Accounts({ attach, running, navigate }) {
         </AlertDialogContent>
       </AlertDialog>
       <ExportDialog open={exportOpen} onOpenChange={setExportOpen} />
+      <AccountCreateDialog open={createOpen} onOpenChange={setCreateOpen} onCreated={refreshLists} />
       <ManualLoginDialog
         open={manualOpen}
         onOpenChange={setManualOpen}
