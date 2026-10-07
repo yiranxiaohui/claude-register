@@ -18,3 +18,6 @@ api:
   key: ""                # 在面板「设置 → 开放 API」生成；调用时放在 Authorization: Bearer <key>
 oauth:
   auto_after_register: false  # 注册拿到 sessionKey 后自动换取 Claude OAuth 令牌
+sub2api:
+  base_url: ""   # 如 http://sub2api.syixn.com:8080，用于「sub2api 同步」页重新授权并写回
+  admin_key: ""  # sub2api 管理员 API Key（sub2api 后台 → 系统设置生成）

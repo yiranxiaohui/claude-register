@@ -34,6 +34,9 @@ class Config:
     api_key: str = ""
     # 注册成功（拿到 sessionKey）后自动用它获取 Claude OAuth 令牌；默认关闭。
     oauth_auto_after_register: bool = False
+    # sub2api 对接：用于把重新授权得到的 OAuth 令牌写回 sub2api 的账号。
+    sub2api_base_url: str = ""
+    sub2api_admin_key: str = ""
 
 
 _NODE_KEYS = ("name", "base_url", "username", "password", "proxy_host")
@@ -57,6 +60,7 @@ def load_config(path: Path) -> Config:
     tk = raw.get("takeover", {}) or {}
     api = raw.get("api", {}) or {}
     oa = raw.get("oauth", {}) or {}
+    s2 = raw.get("sub2api", {}) or {}
     return Config(
         panel_password=str(panel.get("password", "") or ""),
         panel_port=int(panel.get("port", 8790)),
@@ -79,6 +83,8 @@ def load_config(path: Path) -> Config:
         api_enabled=bool(api.get("enabled", False)),
         api_key=str(api.get("key", "") or ""),
         oauth_auto_after_register=bool(oa.get("auto_after_register", False)),
+        sub2api_base_url=str(s2.get("base_url", "") or ""),
+        sub2api_admin_key=str(s2.get("admin_key", "") or ""),
     )
 
 
@@ -98,6 +104,8 @@ _FIELD_MAP = {
     "api_enabled": ("api", "enabled"),
     "api_key": ("api", "key"),
     "oauth_auto_after_register": ("oauth", "auto_after_register"),
+    "sub2api_base_url": ("sub2api", "base_url"),
+    "sub2api_admin_key": ("sub2api", "admin_key"),
 }
 
 
@@ -105,7 +113,7 @@ def save_config(path: Path, updates: dict) -> Config:
     cfg = load_config(path)
     # 密码/密钥留空 = 不修改
     clean = dict(updates)
-    for secret in ("panel_password", "anymail_api_key", "api_key"):
+    for secret in ("panel_password", "anymail_api_key", "api_key", "sub2api_admin_key"):
         if secret in clean and clean[secret] in ("", REDACTED, None):
             clean.pop(secret)
     # xui 标量：不在 _FIELD_MAP，手动并入
@@ -129,7 +137,7 @@ def save_config(path: Path, updates: dict) -> Config:
             merged.append(node)
         cfg = replace(cfg, xui_nodes=tuple(merged))
     out: dict = {"panel": {}, "anymail": {}, "register": {}, "xui": {}, "takeover": {}, "api": {},
-                 "oauth": {}}
+                 "oauth": {}, "sub2api": {}}
     for field, (section, key) in _FIELD_MAP.items():
         out[section][key] = getattr(cfg, field)
     out["register"]["proxies"] = [dict(p) for p in cfg.saved_proxies]
@@ -147,6 +155,8 @@ def save_config(path: Path, updates: dict) -> Config:
 
 def to_dict(cfg: Config) -> dict:
     d = {f: getattr(cfg, f) for f in _FIELD_MAP}
+    # sub2api 管理员 Key 只回显占位符；保存时占位符 = 不修改
+    d["sub2api_admin_key"] = REDACTED if cfg.sub2api_admin_key else ""
     d["saved_proxies"] = [dict(p) for p in cfg.saved_proxies]
     d["xui_enabled"] = cfg.xui_enabled
     d["xui_expiry_days"] = cfg.xui_expiry_days
