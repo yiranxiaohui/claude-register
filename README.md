@@ -36,6 +36,17 @@ docker compose up -d
 
 面板里改的设置会写回 `config.yaml`，接口和日志里 AnyMail Key 等敏感字段做了脱敏。
 
+### 账号管理（增删改查）
+
+「账号管理」页支持完整的增删改查：
+
+- **增**：「新增账号」手动录入已有账号，只有邮箱必填，可同时填写备注、密码、sessionKey、代理、mailUrl、mailKey；邮箱已存在时拒绝（不会覆盖）。也可以继续用「导入 SK…」「手动登录…」批量/交互式建号。
+- **查**：按邮箱 / 备注 / 代理 / sessionKey 搜索，并按存活检测结果（有效、失效、被拦截、未检测）、是否已获取、是否有 sessionKey 筛选。
+- **改**：「编辑」可修改上述全部字段，包括邮箱本身（例如把导入时的 `sk-…@sk-import.local` 占位标识改成真实邮箱；正在接管的账号需先结束接管）。
+- **删**：每行的删除按钮单个删除，或勾选（支持全选当前筛选结果）后「删除所选」批量删除，均需二次确认。
+
+对应的面板内部接口（需面板登录 Cookie）：`GET /api/accounts`、`POST /api/accounts`、`PATCH /api/accounts/{email}`、`DELETE /api/accounts/{email}`、`POST /api/accounts/batch-delete`（body `{"emails": [...]}`）。
+
 ## Xpra HTML5 免密登录接管
 
 账号列表里凡抓到 `sessionKey` 的账号，都可点「接管」：后台会用这份 Cookie 开一个

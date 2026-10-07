@@ -323,16 +323,79 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
+    async def _json_object(request: Request) -> dict:
+        try:
+            body = await request.json() if await request.body() else {}
+        except Exception:  # noqa: BLE001 — 非 JSON 属于客户端错误
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="请求体必须是对象")
+        return body
+
+    def _editable_fields(body: dict) -> dict:
+        fields = {}
+        for k in db.ACCOUNT_EDITABLE_FIELDS:
+            if k not in body:
+                continue
+            v = body[k]
+            if v is not None and not isinstance(v, str):
+                raise HTTPException(status_code=400, detail=f"{k} 必须是字符串")
+            fields[k] = (v or "") if k == "password" else (v or "").strip()
+        return fields
+
+    def _valid_email(value) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(status_code=400, detail="邮箱不能为空")
+        email = value.strip().lower()
+        if not sk_import.EMAIL_RE.fullmatch(email):
+            raise HTTPException(status_code=400, detail="邮箱格式不正确")
+        return email
+
+    @app.post("/api/accounts", status_code=201)
+    async def account_create(request: Request, _=Depends(require_auth)):
+        """手动新增账号。body: {email, password?, session_key?, proxy?, display_name?,
+        mail_key?, mail_base_url?}。邮箱已存在返回 409。"""
+        body = await _json_object(request)
+        email = _valid_email(body.get("email"))
+        fields = _editable_fields(body)
+        try:
+            row = db.create_account(state.conn, email, fields, created_at=state.now_fn())
+        except db.AccountExists:
+            raise HTTPException(status_code=409, detail="该邮箱的账号已存在") from None
+        log(f"已手动新增账号：{email}")
+        return {**row, "text": _account_text(row)}
+
+    @app.post("/api/accounts/batch-delete")
+    async def accounts_batch_delete(request: Request, _=Depends(require_auth)):
+        """批量删除。body: {emails: [...]}，返回实际删除数。"""
+        body = await _json_object(request)
+        emails = body.get("emails")
+        if not isinstance(emails, list) or not all(isinstance(e, str) for e in emails):
+            raise HTTPException(status_code=400, detail="emails 必须是字符串数组")
+        if not emails:
+            raise HTTPException(status_code=400, detail="未选择任何账号")
+        deleted = db.delete_accounts(state.conn, emails)
+        return {"ok": True, "deleted": deleted}
+
     @app.patch("/api/accounts/{email}")
     async def account_update(email: str, request: Request, _=Depends(require_auth)):
         if db.get_account(state.conn, email) is None:
             raise HTTPException(status_code=404, detail="账号不存在")
-        body = await request.json() if await request.body() else {}
-        fields = {k: body[k] for k in db.ACCOUNT_EDITABLE_FIELDS if k in body}
-        if not fields:
+        body = await _json_object(request)
+        fields = _editable_fields(body)
+        new_email = _valid_email(body["email"]) if "email" in body else email
+        if not fields and new_email == email:
             raise HTTPException(status_code=400, detail="没有可更新的字段")
-        db.update_account_fields(state.conn, email, fields)
-        row = db.get_account(state.conn, email)
+        if new_email != email:
+            if state.takeover.status().get("email") == email:
+                raise HTTPException(status_code=409, detail="该账号正在接管，请先结束接管再改邮箱")
+            try:
+                db.rename_account(state.conn, email, new_email)
+            except db.AccountExists:
+                raise HTTPException(status_code=409, detail="该邮箱的账号已存在") from None
+        if fields:
+            db.update_account_fields(state.conn, new_email, fields)
+        row = db.get_account(state.conn, new_email)
         return {**row, "text": _account_text(row)}
 
     @app.put("/api/accounts/{email}/claimed")
