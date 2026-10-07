@@ -54,6 +54,22 @@ const GROUPS = [
     ],
   },
   {
+    title: "sub2api 对接",
+    fields: [
+      {
+        key: "sub2api_base_url",
+        label: "sub2api 地址",
+        type: "text",
+        placeholder: "http://sub2api.syixn.com:8080",
+      },
+      {
+        key: "sub2api_admin_key",
+        label: "sub2api 管理员 API Key（留空不修改；sub2api 后台 → 系统设置里生成）",
+        type: "password",
+      },
+    ],
+  },
+  {
     title: "开放 API",
     fields: [
       { key: "api_enabled", label: "启用开放 API（/api/v1/*）", type: "checkbox" },

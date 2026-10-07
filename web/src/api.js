@@ -124,6 +124,13 @@ export const api = {
       method: "POST",
     }).then(j),
 
+  sub2apiAccounts: () => fetch("/api/sub2api/accounts").then(j),
+
+  sub2apiReauth: (id) =>
+    fetch(`/api/sub2api/accounts/${encodeURIComponent(id)}/reauth`, {
+      method: "POST",
+    }).then(j),
+
   xuiTest: (node) =>
     fetch("/api/xui/test", {
       method: "POST",

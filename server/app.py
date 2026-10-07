@@ -21,7 +21,7 @@ from claude_register.oauth import OAuthError
 from claude_register.proxy_pool import ProxyPool, XuiNode
 from claude_register.session_check import check_session, probe_session
 from claude_register.xui import XuiClient
-from server import auth, db, export, oauth_acquire, open_api, sk_import
+from server import auth, db, export, oauth_acquire, open_api, sk_import, sub2api
 from server.config_store import save_config, to_dict
 from server.deps import AppState, default_now
 from server.runner import RunnerBusy
@@ -766,6 +766,7 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     open_api.register_open_api(
         app, state, start_registration=start_registration, account_rows=_account_rows,
     )
+    sub2api.register_sub2api_routes(app, state, require_auth=require_auth)
 
     # 前端（dist 存在才挂，测试环境无 dist 不报错）
     if WEB_DIST.exists():

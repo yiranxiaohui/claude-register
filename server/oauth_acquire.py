@@ -30,11 +30,14 @@ def unix_from_iso(text: str) -> int:
         return 0
 
 
-def acquire(conn, email: str, *, now: str, authorize=None) -> dict:
+def acquire(conn, email: str, *, now: str, authorize=None,
+            expect_email: str | None = None) -> dict:
     """为账号获取 OAuth 令牌并写库；返回更新后的账号行。
 
     账号不存在抛 AccountNotFound；授权失败抛 oauth.OAuthError，
     其中 kind=dead 时顺带把检测结果记为失效。
+    expect_email 非空时，令牌所属的 Claude 账号邮箱必须与之一致，否则不落库、
+    抛 OAuthError（防止把别的账号的令牌写给 sub2api）。
     """
     row = db.get_account(conn, email)
     if row is None:
@@ -46,6 +49,10 @@ def acquire(conn, email: str, *, now: str, authorize=None) -> dict:
         if exc.kind == "dead":
             db.update_account_check(conn, email, "dead", now)
         raise
+    got = (tokens.email_address or "").strip().lower()
+    want = (expect_email or "").strip().lower()
+    if want and got and got != want:
+        raise oauth.OAuthError(f"授权得到的是 {got} 的令牌，与目标账号 {want} 不一致，已放弃")
     db.update_account_oauth(conn, email, {
         "access_token": tokens.access_token,
         "refresh_token": tokens.refresh_token,

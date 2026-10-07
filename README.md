@@ -105,6 +105,23 @@ scope 为 `user:profile user:inference user:sessions:claude_code user:mcp_server
 - `access_token` 约 8 小时过期；`refresh_token` 只能用一次，导入 sub2api 后由 sub2api 负责刷新，
   不要把同一份令牌同时交给多个系统。sessionKey 失效时授权返回 422，并把账号检测结果记为失效。
 
+### 对接 sub2api：失效账号重新授权并写回
+
+sub2api 里的 Claude OAuth 账号 refresh_token 失效（如 `invalid_grant`）后会被标成「异常」。
+只要本地还有该账号的 sessionKey，就可以在 claude-register 里重新授权并直接写回 sub2api：
+
+1. 「系统设置 → sub2api 对接」填写 sub2api 地址（如 `http://sub2api.syixn.com:8080`）和 sub2api
+   管理员 API Key（sub2api 后台 → 系统设置生成；面板只显示占位符，日志与接口不回显）。
+2. 打开「sub2api 同步」页：列出 sub2api 里的 Claude OAuth 账号（默认只看异常的），显示状态、错误原因、
+   令牌过期时间，并按 `extra.email_address`（缺失时取账号名称里的邮箱）对应到本地账号。
+3. 单个点「重新授权」，或勾选后「重新授权所选」：用本地 sessionKey 走账号绑定的代理获取新令牌，
+   再调用 sub2api 的 `POST /api/v1/admin/accounts/{id}/apply-oauth-credentials` 写回同一个账号——
+   只替换令牌，保留并发、分组、模型映射等配置，并自动清除异常状态。
+
+安全措施：新令牌所属的 Claude 邮箱必须与 sub2api 账号一致，否则不写库也不推送；本地无对应账号或
+无 sessionKey 的不能重新授权；sessionKey 已失效时返回失败并把本地检测结果记为失效。只能手动触发，
+不会自动推送，也不会在 sub2api 新建账号。注意 sub2api 地址若是 `http://`，管理员 Key 会明文经过网络。
+
 ## 开放 API（触发注册、按需导出）
 
 供外部脚本调用，与面板登录互相独立。
