@@ -34,10 +34,17 @@ FIELDS: tuple[ExportField, ...] = (
     ExportField("created_at", "createdAt", "创建时间"),
     ExportField("claimed_at", "claimedAt", "获取时间"),
     ExportField("last_run_id", "runId", "注册任务 ID"),
+    ExportField("access_token", "accessToken", "OAuth access_token", secret=True),
+    ExportField("refresh_token", "refreshToken", "OAuth refresh_token", secret=True),
+    ExportField("oauth_expires_at", "tokenExpiresAt", "令牌过期时间"),
+    ExportField("oauth_scope", "scope", "OAuth scope"),
+    ExportField("org_uuid", "orgUuid", "组织 UUID"),
+    ExportField("account_uuid", "accountUuid", "Claude 账号 UUID"),
+    ExportField("oauth_at", "oauthAt", "授权时间"),
 )
 FIELD_BY_KEY = {f.key: f for f in FIELDS}
 DEFAULT_FIELDS: tuple[str, ...] = ("email", "session_key", "proxy", "mail_base_url", "mail_key")
-FORMATS: tuple[str, ...] = ("text", "json", "csv", "line")
+FORMATS: tuple[str, ...] = ("text", "json", "csv", "line", "sub2api")
 DEFAULT_LINE_SEP = "----"
 MAX_SEP_LEN = 16
 
@@ -132,6 +139,9 @@ def _text_block(item: dict) -> str:
 
 def render(rows, fields, fmt: str, *, sep: str = DEFAULT_LINE_SEP) -> tuple[str, str]:
     """返回 (正文, media_type)。"""
+    if fmt == "sub2api":
+        return json.dumps(sub2api_payload(rows), ensure_ascii=False, indent=2) + "\n", \
+            "application/json"
     items = [pick(r, fields) for r in rows]
     if fmt == "json":
         return json.dumps(items, ensure_ascii=False, indent=2) + "\n", "application/json"
@@ -150,7 +160,107 @@ def render(rows, fields, fmt: str, *, sep: str = DEFAULT_LINE_SEP) -> tuple[str,
     return (body + "\n") if body else "", "text/plain; charset=utf-8"
 
 
-FILE_EXT = {"text": "txt", "json": "json", "csv": "csv", "line": "txt"}
+FILE_EXT = {"text": "txt", "json": "json", "csv": "csv", "line": "txt", "sub2api": "json"}
+
+# ---- sub2api 数据导入格式（管理后台「账号 → 导入数据」）----
+
+_SUB2API_PROTOCOLS = {"http": "http", "https": "https", "socks5": "socks5",
+                      "socks5h": "socks5h", "socks": "socks5"}
+SUB2API_CONCURRENCY = 10  # 与 sub2api 新建账号表单默认值一致
+SUB2API_PRIORITY = 1
+
+
+def _sub2api_proxy(url: str) -> dict | None:
+    """代理 URL → sub2api DataProxy；sub2api 不支持的协议（如 socks4）返回 None。"""
+    from urllib.parse import unquote, urlsplit
+
+    try:
+        parts = urlsplit((url or "").strip())
+        port = parts.port
+    except ValueError:
+        return None
+    protocol = _SUB2API_PROTOCOLS.get((parts.scheme or "").lower())
+    if not protocol or not parts.hostname or not port:
+        return None
+    username = unquote(parts.username or "")
+    password = unquote(parts.password or "")
+    return {
+        # 与 sub2api buildProxyKey 相同的拼法，重复导入时按 key 复用同一代理
+        "proxy_key": f"{protocol}|{parts.hostname}|{port}|{username}|{password}",
+        "name": f"{parts.hostname}:{port}",
+        "protocol": protocol,
+        "host": parts.hostname,
+        "port": port,
+        **({"username": username} if username else {}),
+        **({"password": password} if password else {}),
+        "status": "active",
+    }
+
+
+def _unix(text: str) -> int:
+    from datetime import datetime, timezone
+
+    try:
+        return int(datetime.strptime(text or "", "%Y-%m-%dT%H:%M:%SZ")
+                   .replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return 0
+
+
+def sub2api_payload(rows, *, exported_at: str | None = None) -> dict:
+    """把已授权账号转成 sub2api 的 sub2api-data 导入文件（platform=anthropic, type=oauth）。
+
+    没有 access_token 的账号跳过；账号绑定的代理一并导出并按 proxy_key 关联。
+    """
+    from datetime import datetime, timezone
+
+    proxies: dict[str, dict] = {}
+    accounts = []
+    for row in rows:
+        access = str(row.get("access_token") or "")
+        if not access:
+            continue
+        expires_at = _unix(str(row.get("oauth_expires_at") or ""))
+        obtained = _unix(str(row.get("oauth_at") or ""))
+        credentials = {
+            "access_token": access,
+            "token_type": "Bearer",
+            "scope": str(row.get("oauth_scope") or ""),
+        }
+        if row.get("refresh_token"):
+            credentials["refresh_token"] = str(row["refresh_token"])
+        if expires_at:
+            credentials["expires_at"] = str(expires_at)
+            if obtained and expires_at > obtained:
+                credentials["expires_in"] = str(expires_at - obtained)
+        extra = {k: str(row[k]) for k in ("org_uuid", "account_uuid") if row.get(k)}
+        email = str(row.get("email") or "")
+        if email and not email.endswith("@sk-import.local"):
+            extra["email_address"] = email
+        item = {
+            "name": email,
+            "platform": "anthropic",
+            "type": "oauth",
+            "credentials": credentials,
+            "concurrency": SUB2API_CONCURRENCY,
+            "priority": SUB2API_PRIORITY,
+        }
+        if row.get("display_name"):
+            item["notes"] = str(row["display_name"])
+        if extra:
+            item["extra"] = extra
+        proxy = _sub2api_proxy(str(row.get("proxy") or ""))
+        if proxy:
+            proxies.setdefault(proxy["proxy_key"], proxy)
+            item["proxy_key"] = proxy["proxy_key"]
+        accounts.append(item)
+    return {
+        "type": "sub2api-data",
+        "version": 1,
+        "exported_at": exported_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "proxies": list(proxies.values()),
+        "accounts": accounts,
+    }
 
 
 def describe() -> dict:

@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS accounts (
   mailbox_id TEXT, last_run_id INTEGER, status TEXT,
   password TEXT, session_key TEXT, proxy TEXT, display_name TEXT,
   mail_key TEXT, mail_base_url TEXT,
-  check_status TEXT, checked_at TEXT, claimed_at TEXT
+  check_status TEXT, checked_at TEXT, claimed_at TEXT,
+  access_token TEXT, refresh_token TEXT, oauth_expires_at TEXT, oauth_scope TEXT,
+  org_uuid TEXT, account_uuid TEXT, oauth_at TEXT
 );
 """
 
@@ -30,6 +32,14 @@ _ACCOUNT_EXTRA_COLS = (
     ("check_status", "TEXT"),
     ("checked_at", "TEXT"),
     ("claimed_at", "TEXT"),
+    # Claude OAuth 令牌（sessionKey 自动授权得到）
+    ("access_token", "TEXT"),
+    ("refresh_token", "TEXT"),
+    ("oauth_expires_at", "TEXT"),
+    ("oauth_scope", "TEXT"),
+    ("org_uuid", "TEXT"),
+    ("account_uuid", "TEXT"),
+    ("oauth_at", "TEXT"),
 )
 
 
@@ -215,6 +225,21 @@ def update_account_check(conn, email, status, checked_at) -> bool:
         "UPDATE accounts SET check_status=?, checked_at=? WHERE email=?",
         (status, checked_at, email),
     )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+OAUTH_FIELDS = (
+    "access_token", "refresh_token", "oauth_expires_at", "oauth_scope",
+    "org_uuid", "account_uuid", "oauth_at",
+)
+
+
+def update_account_oauth(conn, email, values: dict) -> bool:
+    """写入 / 覆盖 OAuth 令牌字段（只认 OAUTH_FIELDS），返回是否有行被更新。"""
+    sets = {k: str(values.get(k) or "") for k in OAUTH_FIELDS}
+    sql = "UPDATE accounts SET " + ", ".join(f"{k}=?" for k in sets) + " WHERE email=?"
+    cur = conn.execute(sql, (*sets.values(), email))
     conn.commit()
     return cur.rowcount > 0
 

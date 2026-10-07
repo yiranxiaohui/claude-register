@@ -57,6 +57,22 @@ class Runner:
         t.start()
         return rid
 
+    def _auto_oauth(self, email: str, sink) -> None:
+        """注册成功后自动获取 OAuth 令牌；失败只记日志，不影响注册结果。"""
+        from claude_register.oauth import OAuthError
+        from server import oauth_acquire
+
+        sink("正在用 sessionKey 获取 Claude OAuth 令牌…")
+        try:
+            row = oauth_acquire.acquire(self.conn, email, now=self.now_fn())
+        except OAuthError as exc:
+            sink(f"OAuth 授权失败：{exc}（可稍后在账号页重试）")
+            return
+        except Exception as exc:  # noqa: BLE001
+            sink(f"OAuth 授权出错：{type(exc).__name__}（可稍后在账号页重试）")
+            return
+        sink(f"已获取 OAuth 令牌（过期 {row.get('oauth_expires_at') or '未知'}）")
+
     def _run(self, rid, out_dir: Path, config, email, domain, flow_fn, q):
         log_path = out_dir / "log.txt"
         fh = log_path.open("a", encoding="utf-8")
@@ -104,6 +120,10 @@ class Runner:
                     f"账号入库：{acct_email} status={acct_status} "
                     f"sessionKey={'有' if result.get('sessionKey') else '无'}"
                 )
+                if result.get("sessionKey") and getattr(
+                    config, "oauth_auto_after_register", False,
+                ):
+                    self._auto_oauth(acct_email, sink)
         except Exception as exc:  # noqa: BLE001
             status = "failed"
             sink(f"运行出错：{exc!r}")

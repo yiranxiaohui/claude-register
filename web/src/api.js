@@ -119,6 +119,11 @@ export const api = {
       method: "POST",
     }).then(j),
 
+  accountOAuth: (email) =>
+    fetch(`/api/accounts/${encodeURIComponent(email)}/oauth`, {
+      method: "POST",
+    }).then(j),
+
   xuiTest: (node) =>
     fetch("/api/xui/test", {
       method: "POST",

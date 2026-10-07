@@ -39,6 +39,11 @@ const GROUPS = [
     fields: [
       { key: "register_login_timeout", label: "登录超时（秒）", type: "number" },
       { key: "register_auto_login", label: "注册后自动登录", type: "checkbox" },
+      {
+        key: "oauth_auto_after_register",
+        label: "注册成功后自动获取 Claude OAuth 令牌",
+        type: "checkbox",
+      },
       { key: "register_code_regex", label: "验证码正则", type: "text" },
       {
         key: "register_proxy",
@@ -182,6 +187,10 @@ function ApiUsage() {
     `# 4. 获取一个账号（每次一个，自动标记为「已获取」，不会重复发放；没有可用账号返回 404）`,
     `curl -X POST -H "Authorization: Bearer $KEY" \\`,
     `  "${base}/accounts/claim?fields=email,session_key,password"`,
+    ``,
+    `# 5. 用账号的 sessionKey 获取 Claude OAuth 令牌（access_token / refresh_token）`,
+    `curl -X POST -H "Authorization: Bearer $KEY" -H "content-type: application/json" \\`,
+    `  -d '{"email":"alice@example.com"}' "${base}/accounts/oauth"`,
   ].join("\n");
   return (
     <details className="text-sm">

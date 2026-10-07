@@ -16,7 +16,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from server import auth, db, export, open_api_docs
+from server import auth, db, export, oauth_acquire, open_api_docs
+from claude_register.oauth import OAuthError
 from server.runner import RunnerBusy
 
 # 长轮询上限：容器内 Nginx 对 / 的默认读超时是 60s，留足余量。
@@ -96,8 +97,29 @@ class ClaimResult(BaseModel):
     remaining: int = Field(description="同样条件下剩余可领取的账号数")
 
 
+class OAuthRequest(BaseModel):
+    email: str = Field(description="要授权的账号邮箱（必须已入库且有 sessionKey）",
+                       examples=["alice@example.com"])
+
+
+class OAuthResult(BaseModel):
+    email: str
+    oauth_at: str = Field(description="本次授权时间")
+    oauth_expires_at: str = Field(description="access_token 过期时间（UTC）")
+    account: dict[str, Any] = Field(
+        description="账号信息，只含 fields 选择的字段（默认为 OAuth 令牌字段）",
+        examples=[{"email": "alice@example.com", "access_token": "sk-ant-oat01-...",
+                   "refresh_token": "sk-ant-ort01-..."}])
+    export: str | None = Field(None, description="format 为 text/csv/line/sub2api 时的导出文本")
+
+
+OAUTH_DEFAULT_FIELDS = ("email", "access_token", "refresh_token", "oauth_expires_at",
+                        "org_uuid", "account_uuid")
+
+
 DOC_MODELS = (RegisterRequest, RegisterAccepted, RegisterBusy, RegisterResult,
-              ErrorResponse, FieldInfo, FieldsInfo, ProxyItem, ClaimResult)
+              ErrorResponse, FieldInfo, FieldsInfo, ProxyItem, ClaimResult,
+              OAuthRequest, OAuthResult)
 _AUTH_ERRORS = {
     401: {"model": ErrorResponse, "description": "缺少或错误的 API Key"},
     403: {"model": ErrorResponse, "description": "服务未启用开放 API"},
@@ -162,6 +184,8 @@ def export_response(rows, *, fields, fmt, sep, emails, status, check_status,
         rows, emails=_split(emails), status=status or None,
         check_status=check_status or None, claimed=claimed_filter,
     )
+    if fmt == "sub2api":  # sub2api 只导入已授权的账号
+        picked = [r for r in picked if r.get("access_token")]
     body, media = export.render(picked, keys, fmt, sep=sep)
     headers = {"X-Total-Count": str(len(picked))}
     if download:
@@ -347,6 +371,67 @@ def register_open_api(app: FastAPI, state, *, start_registration, account_rows) 
             "claimed_at": acct["claimed_at"],
             "account": export.pick(acct, keys),
             "remaining": db.count_claimable(state.conn, check_status=check_status or None),
+        }
+        if fmt != "json":
+            result["export"] = export.render([acct], keys, fmt, sep=line_sep)[0]
+        return result
+
+    @app.post(
+        "/api/v1/accounts/oauth", tags=["OAuth"], summary="用 sessionKey 获取 Claude OAuth 令牌",
+        responses={
+            200: {"model": OAuthResult, "description": "授权成功，令牌已写入账号"},
+            400: {"model": ErrorResponse, "description": "参数不合法或账号无 sessionKey"},
+            404: {"model": ErrorResponse, "description": "账号不存在"},
+            422: {"model": ErrorResponse, "description": "授权失败（sessionKey 失效、被拦截等）"},
+            **_AUTH_ERRORS,
+        },
+        openapi_extra={"requestBody": {"required": True, "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/OAuthRequest"}}}}},
+    )
+    async def v1_accounts_oauth(
+        request: Request,
+        fields: str | None = Query(
+            None, description="逗号分隔的字段名，默认 " + ",".join(OAUTH_DEFAULT_FIELDS)),
+        format: str = Query("json", description="设为 text/csv/line/sub2api 时额外返回 export 文本",
+                            json_schema_extra={"enum": list(export.FORMATS)}),
+        sep: str | None = Query(None, description="format=line 的分隔符，默认 ----"),
+        _=Depends(require_api_key),
+    ):
+        """用账号保存的 sessionKey（经账号绑定的代理）自动完成完整的 Claude OAuth 授权，
+        返回 access_token / refresh_token 并写入账号。每次调用都会重新授权、覆盖旧令牌。"""
+        try:
+            keys = export.parse_fields(fields if fields is not None else OAUTH_DEFAULT_FIELDS)
+            fmt = export.parse_format(format)
+            line_sep = export.parse_sep(sep)
+        except export.ExportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        try:
+            body = await request.json() if await request.body() else {}
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+        email = body.get("email") if isinstance(body, dict) else None
+        if not isinstance(email, str) or not email.strip():
+            raise HTTPException(status_code=400, detail="email 必须是非空字符串")
+        email = email.strip()
+        row = db.get_account(state.conn, email) or db.get_account(state.conn, email.lower())
+        if row is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        email = row["email"]
+        if not row.get("session_key"):
+            raise HTTPException(status_code=400, detail="该账号无 sessionKey")
+        try:
+            acct = await asyncio.to_thread(
+                oauth_acquire.acquire, state.conn, email, now=state.now_fn(),
+            )
+        except oauth_acquire.AccountNotFound:
+            raise HTTPException(status_code=404, detail="账号不存在") from None
+        except OAuthError as exc:
+            raise HTTPException(status_code=422, detail=f"OAuth 授权失败：{exc}") from None
+        result = {
+            "email": acct["email"],
+            "oauth_at": acct.get("oauth_at") or "",
+            "oauth_expires_at": acct.get("oauth_expires_at") or "",
+            "account": export.pick(acct, keys),
         }
         if fmt != "json":
             result["export"] = export.render([acct], keys, fmt, sep=line_sep)[0]
