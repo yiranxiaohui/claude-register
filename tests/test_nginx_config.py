@@ -20,7 +20,9 @@ def test_takeover_api_outlives_default_nginx_read_timeout():
     """接管 start/relogin 是长同步请求，默认 60s 会抢先回 504、吞掉真实报错。"""
     config = (ROOT / "deploy" / "nginx.conf").read_text(encoding="utf-8")
 
-    block = config.split("location /api/takeover/ {", 1)[1].split("}", 1)[0]
+    block = config.split("location /api/takeover {", 1)[1].split("}", 1)[0]
+    # 带结尾斜杠的前缀会把状态接口 GET /api/takeover 自动 301 到 /api/takeover/。
+    assert "location /api/takeover/ {" not in config
     assert "proxy_pass http://panel;" in block
     assert "proxy_read_timeout 600s;" in block
     assert "proxy_set_header X-Forwarded-Proto $forwarded_proto;" in block
