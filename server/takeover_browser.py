@@ -38,6 +38,19 @@ from claude_register.mailbox import utc_now_iso
 DEFAULT_TAKEOVER_MAX_UPSTREAM = 16
 
 
+# 接管页导航只等到 commit（收到首个响应），不等 DOMContentLoaded。
+# 已登录的 claude.ai 首页要从 assets-proxy.anthropic.com 并发拉几十个 JS 模块，
+# 经部分机场代理时 HTTP/2 多路复用会卡住，DOMContentLoaded 迟迟不来，
+# 60s 超时后整个接管会话被拆掉。接管本来就是给人看的：页面在 Xpra 画面里
+# 继续加载即可，拿到首个响应就说明代理与 claude.ai 都可达。
+TAKEOVER_NAV_WAIT_UNTIL = "commit"
+TAKEOVER_NAV_TIMEOUT_MS = 45_000
+
+
+def _open_takeover_page(page, url: str) -> None:
+    page.goto(url, wait_until=TAKEOVER_NAV_WAIT_UNTIL, timeout=TAKEOVER_NAV_TIMEOUT_MS)
+
+
 def takeover_max_upstream() -> int:
     raw = os.environ.get("TAKEOVER_MAX_UPSTREAM", "")
     try:
@@ -202,8 +215,8 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
         context = new_context(browser)
         if not session_key:
             page = context.new_page()
-            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
-            log("手动登录浏览器已打开 claude.ai 登录页。")
+            _open_takeover_page(page, LOGIN_URL)
+            log("手动登录浏览器已打开 claude.ai 登录页（页面在接管画面中继续加载）。")
             if login_email:
                 _prefill_login_email(page, login_email)
             return _BrowserHandle(session, relay, page)
@@ -216,8 +229,8 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
             "httpOnly": True,
         }])
         page = context.new_page()
-        page.goto("https://claude.ai", wait_until="domcontentloaded", timeout=60_000)
-        log("接管浏览器已注入 sessionKey 并打开 claude.ai。")
+        _open_takeover_page(page, "https://claude.ai")
+        log("接管浏览器已注入 sessionKey 并打开 claude.ai（页面在接管画面中继续加载）。")
     except Exception as exc:
         session.close()
         if relay is not None:
