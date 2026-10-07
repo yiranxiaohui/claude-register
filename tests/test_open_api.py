@@ -131,7 +131,7 @@ def test_fields_describe(tmp_path):
     keys = [f["key"] for f in d["fields"]]
     assert d["default_fields"] == ["email", "session_key", "proxy", "mail_base_url", "mail_key"]
     assert {"password", "check_status", "created_at"} <= set(keys)
-    assert set(d["formats"]) == {"text", "json", "csv", "line"}
+    assert set(d["formats"]) == {"text", "json", "csv", "line", "sub2api"}
 
 
 def test_proxies_hide_urls(tmp_path):

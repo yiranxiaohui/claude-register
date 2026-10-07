@@ -32,6 +32,8 @@ class Config:
     # 开放 API（/api/v1/*）：独立于面板登录，用 API Key 鉴权；默认关闭。
     api_enabled: bool = False
     api_key: str = ""
+    # 注册成功（拿到 sessionKey）后自动用它获取 Claude OAuth 令牌；默认关闭。
+    oauth_auto_after_register: bool = False
 
 
 _NODE_KEYS = ("name", "base_url", "username", "password", "proxy_host")
@@ -54,6 +56,7 @@ def load_config(path: Path) -> Config:
     nodes = tuple(_load_node(n) for n in (xui.get("nodes") or []))
     tk = raw.get("takeover", {}) or {}
     api = raw.get("api", {}) or {}
+    oa = raw.get("oauth", {}) or {}
     return Config(
         panel_password=str(panel.get("password", "") or ""),
         panel_port=int(panel.get("port", 8790)),
@@ -75,6 +78,7 @@ def load_config(path: Path) -> Config:
         takeover_idle_timeout_min=int(tk.get("idle_timeout_min", 15)),
         api_enabled=bool(api.get("enabled", False)),
         api_key=str(api.get("key", "") or ""),
+        oauth_auto_after_register=bool(oa.get("auto_after_register", False)),
     )
 
 
@@ -93,6 +97,7 @@ _FIELD_MAP = {
     "takeover_idle_timeout_min": ("takeover", "idle_timeout_min"),
     "api_enabled": ("api", "enabled"),
     "api_key": ("api", "key"),
+    "oauth_auto_after_register": ("oauth", "auto_after_register"),
 }
 
 
@@ -123,7 +128,8 @@ def save_config(path: Path, updates: dict) -> Config:
                 node["password"] = old_by_base.get(node["base_url"], {}).get("password", "")
             merged.append(node)
         cfg = replace(cfg, xui_nodes=tuple(merged))
-    out: dict = {"panel": {}, "anymail": {}, "register": {}, "xui": {}, "takeover": {}, "api": {}}
+    out: dict = {"panel": {}, "anymail": {}, "register": {}, "xui": {}, "takeover": {}, "api": {},
+                 "oauth": {}}
     for field, (section, key) in _FIELD_MAP.items():
         out[section][key] = getattr(cfg, field)
     out["register"]["proxies"] = [dict(p) for p in cfg.saved_proxies]

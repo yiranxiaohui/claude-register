@@ -16,3 +16,5 @@ takeover:
 api:
   enabled: false         # 开放 API（/api/v1/*）总开关
   key: ""                # 在面板「设置 → 开放 API」生成；调用时放在 Authorization: Bearer <key>
+oauth:
+  auto_after_register: false  # 注册拿到 sessionKey 后自动换取 Claude OAuth 令牌

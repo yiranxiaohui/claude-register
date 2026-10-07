@@ -82,6 +82,29 @@ docker compose up -d
 - 普通接管里手动重新登录后，新的 sk 同样会被自动取出并回写。
 - 对应接口：`POST /api/takeover/manual`（`{email?, proxy_id?}`）、`POST /api/takeover/capture`。
 
+## Claude OAuth 授权（sessionKey → access_token / refresh_token）
+
+账号有 `sessionKey` 时，可以直接换取完整的 Claude OAuth 令牌，流程与 sub2api 的
+「Cookie 自动授权」一致，全程不开浏览器：
+
+1. `GET https://claude.ai/api/organizations` 取组织 UUID（有 team 组织时优先）；
+2. 本地生成 PKCE（`code_verifier` / S256 `code_challenge` / `state`）；
+3. `POST https://claude.ai/v1/oauth/{org}/authorize` 用 sessionKey 拿授权码；
+4. `POST https://platform.claude.com/v1/oauth/token` 换取 `access_token` / `refresh_token`。
+
+scope 为 `user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`
+（内部授权接口不支持 `org:create_api_key`）。claude.ai 请求使用浏览器 TLS 指纹，并走账号绑定的代理。
+
+- 账号页每行的「OAuth」按钮为单个账号授权（已授权时显示「重新授权」），勾选后可「获取 OAuth」批量授权；
+  「编辑」展开后可复制 access_token / refresh_token / 组织与账号 UUID。筛选里可按是否已授权过滤。
+- 「系统设置 → 注册参数」勾选「注册成功后自动获取 Claude OAuth 令牌」后，每次注册拿到 sessionKey 会自动授权；
+  授权失败只记日志，不影响注册结果。
+- 导出新增字段 `access_token`、`refresh_token`、`oauth_expires_at`、`oauth_scope`、`org_uuid`、`account_uuid`、
+  `oauth_at`，以及 `sub2api` 格式：直接生成 sub2api「导入数据」文件（Anthropic · OAuth 账号，附带绑定代理）。
+- 开放 API：`POST /api/v1/accounts/oauth`（body `{"email": ...}`）返回并保存令牌。
+- `access_token` 约 8 小时过期；`refresh_token` 只能用一次，导入 sub2api 后由 sub2api 负责刷新，
+  不要把同一份令牌同时交给多个系统。sessionKey 失效时授权返回 422，并把账号检测结果记为失效。
+
 ## 开放 API（触发注册、按需导出）
 
 供外部脚本调用，与面板登录互相独立。
@@ -112,6 +135,7 @@ X-API-Key: <key>
 | `GET /api/v1/register/{run_id}` | 查询结果。`wait`（0–50 秒）长轮询；`fields` 选择返回字段；`format=text/csv/line` 时额外返回 `export` 文本（`line` 可用 `sep` 指定分隔符，默认 `----`） |
 | `GET /api/v1/accounts/export` | 批量导出。`fields`、`format`（`json` 默认 / `text` / `csv` / `line`）、`sep`，过滤：`status`（`success`/`needs_manual`）、`check_status`（`alive`/`dead`/…）、`claimed`（`true`/`false`）、`emails`（逗号分隔）。响应头 `X-Total-Count` 为条数 |
 | `POST /api/v1/accounts/claim` | 获取一个账号：每次返回一个注册成功、有 sessionKey、未获取过的账号（默认跳过检测为 `dead`/`blocked` 的，`check_status=alive` 可只取有效的），并标记为「已获取」，不会重复发放。支持 `fields`/`format`/`sep`；返回 `account`、`claimed_at`、`remaining`；没有可用账号返回 `404`。面板账号列表显示「已获取」标签，可在「编辑」里取消标记 |
+| `POST /api/v1/accounts/oauth` | 用账号的 sessionKey 获取 Claude OAuth 令牌并保存。body `{"email"}`；`fields` 默认 OAuth 令牌字段；授权失败返回 `422` |
 | `GET /api/v1/fields` | 可选字段与格式 |
 | `GET /api/v1/proxies` | 代理池里的 `id` 与名称（不返回地址和凭据） |
 
@@ -120,7 +144,8 @@ sessionKey（账号已入库，可在面板接管）、`failed` 失败；后两�
 
 可选字段（`fields`，逗号分隔，按给出的顺序输出）：`email`、`session_key`、`proxy`、`mail_base_url`、
 `mail_key`、`password`、`display_name`、`domain`、`status`、`check_status`、`checked_at`、`created_at`、
-`claimed_at`、`last_run_id`。默认是前五项，`text` 格式与面板「导出」的默认输出一致。
+`claimed_at`、`last_run_id`、`access_token`、`refresh_token`、`oauth_expires_at`、`oauth_scope`、`org_uuid`、
+`account_uuid`、`oauth_at`。默认是前五项，`text` 格式与面板「导出」的默认输出一致。
 
 示例：触发注册 → 等到完成 → 取邮箱 + sessionKey + 密码：
 

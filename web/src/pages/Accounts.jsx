@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Download, LogIn, Plus, Search, Trash2, Upload } from "lucide-react";
+import { Download, KeyRound, LogIn, Plus, Search, Trash2, Upload } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/status-badge";
@@ -37,6 +37,8 @@ const FILTERS = [
   ["claimed", "已获取"],
   ["unclaimed", "未获取"],
   ["no_sk", "无 sessionKey"],
+  ["oauth", "已授权 OAuth"],
+  ["no_oauth", "未授权 OAuth"],
 ];
 
 function matchFilter(a, filter) {
@@ -53,6 +55,10 @@ function matchFilter(a, filter) {
       return !a.claimed_at;
     case "no_sk":
       return !a.session_key;
+    case "oauth":
+      return !!a.access_token;
+    case "no_oauth":
+      return !a.access_token;
     default:
       return true;
   }
@@ -98,8 +104,47 @@ function LiveBadge({ status, checkedAt, detail }) {
   );
 }
 
+function untilTime(iso) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const sec = Math.round((then - Date.now()) / 1000);
+  if (sec <= 0) return "已过期";
+  if (sec < 3600) return `${Math.max(1, Math.floor(sec / 60))} 分钟后过期`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时后过期`;
+  return `${Math.floor(sec / 86400)} 天后过期`;
+}
+
+function OAuthBadge({ acct }) {
+  if (!acct.access_token) return null;
+  const expired = acct.oauth_expires_at && new Date(acct.oauth_expires_at).getTime() <= Date.now();
+  return (
+    <Badge
+      className={cn(
+        "rounded-full border-transparent",
+        expired ? "bg-muted text-muted-foreground" : "bg-sky-500/15 text-sky-400",
+      )}
+      title={`OAuth 授权时间：${acct.oauth_at || "未知"}\naccess_token 过期：${acct.oauth_expires_at || "未知"}`}
+    >
+      OAuth
+      {acct.oauth_expires_at ? (
+        <span className="ml-1 font-normal opacity-70">· {untilTime(acct.oauth_expires_at)}</span>
+      ) : null}
+    </Badge>
+  );
+}
+
+const OAUTH_COPY_FIELDS = [
+  ["access_token", "access_token"],
+  ["refresh_token", "refresh_token"],
+  ["org_uuid", "组织 UUID"],
+  ["account_uuid", "账号 UUID"],
+];
+
 export default function Accounts({ attach, running, navigate }) {
   const [accounts, setAccounts] = useState([]);
+  const [authorizing, setAuthorizing] = useState(() => new Set());
+  const [batchOAuth, setBatchOAuth] = useState(null); // {done, total, ok, failed}
   const [takeover, setTakeover] = useState({ running: false, email: null });
   const [relogging, setRelogging] = useState(false);
   const [checking, setChecking] = useState("");
@@ -246,8 +291,61 @@ export default function Accounts({ attach, running, navigate }) {
     }
   }
 
+  const setAuthorizingFlag = (email, on) =>
+    setAuthorizing((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(email);
+      else next.delete(email);
+      return next;
+    });
+
+  // 用 sessionKey 获取 OAuth 令牌；成功返回 true。quiet 时不弹成功提示（批量用）。
+  async function runOAuth(acctEmail, { quiet = false } = {}) {
+    setAuthorizingFlag(acctEmail, true);
+    try {
+      const row = await api.accountOAuth(acctEmail);
+      setAccounts((list) => list.map((a) => (a.email === acctEmail ? { ...a, ...row } : a)));
+      if (!quiet) toast.success(`「${acctEmail}」已获取 OAuth 令牌`);
+      return true;
+    } catch (e) {
+      if (e?.status === 401) return false;
+      if (!quiet) {
+        toast.error(e.body?.detail || `「${acctEmail}」OAuth 授权失败（${e.status || "?"}）`);
+        if (e.status === 422) refreshLists(); // sessionKey 失效时后端已把检测结果记为失效
+      }
+      return false;
+    } finally {
+      setAuthorizingFlag(acctEmail, false);
+    }
+  }
+
+  // 批量授权：前端并发 2 路逐个调用，避免单个长请求被反代超时，也能显示进度。
+  async function runBatchOAuth(emails) {
+    const queue = [...emails];
+    const stat = { done: 0, total: emails.length, ok: 0, failed: 0 };
+    setBatchOAuth({ ...stat });
+    const worker = async () => {
+      while (queue.length) {
+        const email = queue.shift();
+        const ok = await runOAuth(email, { quiet: true });
+        stat.done += 1;
+        if (ok) stat.ok += 1;
+        else stat.failed += 1;
+        setBatchOAuth({ ...stat });
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    setBatchOAuth(null);
+    refreshLists();
+    if (stat.failed) toast.error(`OAuth 授权完成：成功 ${stat.ok} 个，失败 ${stat.failed} 个`);
+    else toast.success(`OAuth 授权完成：成功 ${stat.ok} 个`);
+  }
+
   async function copyLine(acct) {
-    const text = acct.text || acct.email;
+    return copyText(acct.text || acct.email, acct.email);
+  }
+
+  async function copyText(text, copiedKey) {
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
@@ -262,7 +360,7 @@ export default function Accounts({ attach, running, navigate }) {
         document.execCommand("copy");
         document.body.removeChild(ta);
       }
-      setCopiedEmail(acct.email);
+      setCopiedEmail(copiedKey);
       setTimeout(() => setCopiedEmail(""), 1500);
     } catch {
       toast.error("复制失败，请手动复制");
@@ -511,6 +609,22 @@ export default function Accounts({ attach, running, navigate }) {
               </span>
               {selectedVisible.length > 0 && (
                 <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!!batchOAuth || !selectedVisible.some((a) => a.session_key)}
+                  title="用 sessionKey 为所选账号获取 Claude OAuth 令牌（没有 sessionKey 的跳过）"
+                  onClick={() =>
+                    runBatchOAuth(selectedVisible.filter((a) => a.session_key).map((a) => a.email))
+                  }
+                >
+                  <KeyRound />
+                  {batchOAuth
+                    ? `授权中 ${batchOAuth.done}/${batchOAuth.total}…`
+                    : `获取 OAuth（${selectedVisible.filter((a) => a.session_key).length}）`}
+                </Button>
+              )}
+              {selectedVisible.length > 0 && (
+                <Button
                   variant="destructive"
                   size="sm"
                   onClick={() => setDeleteTargets(selectedVisible.map((a) => a.email))}
@@ -560,6 +674,7 @@ export default function Accounts({ attach, running, navigate }) {
                             <span className="ml-1 font-normal opacity-70">· {relTime(a.claimed_at)}</span>
                           </Badge>
                         ) : null}
+                        <OAuthBadge acct={a} />
                         {a.display_name ? <span>{a.display_name}</span> : null}
                         {a.session_key ? (
                           <span className="font-mono">
@@ -607,6 +722,21 @@ export default function Accounts({ attach, running, navigate }) {
                         <Button
                           variant="outline"
                           size="sm"
+                          title="用 sessionKey 自动完成 Claude OAuth 授权，获取 access_token / refresh_token"
+                          onClick={() => runOAuth(a.email)}
+                          disabled={authorizing.has(a.email)}
+                        >
+                          {authorizing.has(a.email)
+                            ? "授权中…"
+                            : a.access_token
+                              ? "重新授权"
+                              : "OAuth"}
+                        </Button>
+                      )}
+                      {a.session_key && (
+                        <Button
+                          variant="outline"
+                          size="sm"
                           className="border-blue-500/50 text-blue-400 hover:text-blue-300"
                           onClick={() => startTakeover(a.email)}
                         >
@@ -633,6 +763,32 @@ export default function Accounts({ attach, running, navigate }) {
                         disabled={saving}
                         idPrefix={`edit-${a.email}`}
                       />
+                      {a.access_token && (
+                        <div className="flex flex-col gap-1.5 rounded-md border bg-muted/30 p-2.5 text-xs">
+                          <div className="flex items-center justify-between text-muted-foreground">
+                            <span>
+                              OAuth 令牌 · 授权于 {a.oauth_at || "未知"} · access_token 过期{" "}
+                              {a.oauth_expires_at || "未知"}
+                            </span>
+                          </div>
+                          {OAUTH_COPY_FIELDS.filter(([k]) => a[k]).map(([k, label]) => (
+                            <div key={k} className="flex items-center gap-2">
+                              <span className="w-24 shrink-0 text-muted-foreground">{label}</span>
+                              <span className="min-w-0 flex-1 truncate font-mono">
+                                {k.endsWith("_token") ? `${String(a[k]).slice(0, 18)}…` : a[k]}
+                              </span>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-7 px-2"
+                                onClick={() => copyText(String(a[k]), `${a.email}:${k}`)}
+                              >
+                                {copiedEmail === `${a.email}:${k}` ? "已复制" : "复制"}
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <div className="flex items-center gap-2">
                         <Button size="sm" onClick={saveEdit} disabled={saving}>
                           {saving ? "保存中…" : "保存"}

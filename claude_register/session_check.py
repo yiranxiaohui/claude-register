@@ -62,6 +62,11 @@ class _ImpersonatingClient:
     def get(self, url, *, headers=None, cookies=None, timeout=None):
         return self._session.get(url, headers=headers, cookies=cookies, timeout=timeout)
 
+    def post(self, url, *, json=None, headers=None, cookies=None, timeout=None):
+        return self._session.post(
+            url, json=json, headers=headers, cookies=cookies, timeout=timeout,
+        )
+
     def close(self) -> None:
         try:
             self._session.close()

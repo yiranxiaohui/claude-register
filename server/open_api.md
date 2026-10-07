@@ -74,6 +74,7 @@ else:
 | `GET` | `/api/v1/register/{run_id}` | 查询注册结果（支持长轮询、字段选择） |
 | `GET` | `/api/v1/accounts/export` | 批量导出账号 |
 | `POST` | `/api/v1/accounts/claim` | 获取一个账号并标记为已获取 |
+| `POST` | `/api/v1/accounts/oauth` | 用账号的 sessionKey 获取 Claude OAuth 令牌 |
 | `GET` | `/api/v1/fields` | 可导出的字段与格式 |
 | `GET` | `/api/v1/proxies` | 可选的注册代理 |
 
@@ -203,6 +204,48 @@ curl -X POST -H "Authorization: Bearer $KEY" \
   "$BASE/accounts/claim?format=line&fields=email,session_key" | jq -r .export
 ```
 
+### POST /api/v1/accounts/oauth
+
+用账号保存的 sessionKey（经账号绑定的代理）自动完成**完整的 Claude OAuth 授权**（PKCE，
+与 sub2api「Cookie 自动授权」相同的流程），返回 `access_token` / `refresh_token` 并写入账号。
+每次调用都会重新授权并覆盖该账号之前保存的令牌。
+
+请求体：`{"email": "alice@example.com"}`（账号必须已入库且有 sessionKey）。
+
+Query 参数：`fields`（默认 `email,access_token,refresh_token,oauth_expires_at,org_uuid,account_uuid`）、
+`format`（默认 `json`；`text` / `csv` / `line` / `sub2api` 时额外返回 `export` 文本）、`sep`。
+
+响应：
+
+```json
+{
+  "email": "alice@example.com",
+  "oauth_at": "2026-09-24T08:10:00Z",
+  "oauth_expires_at": "2026-09-24T16:10:00Z",
+  "account": {
+    "email": "alice@example.com",
+    "access_token": "sk-ant-oat01-...",
+    "refresh_token": "sk-ant-ort01-...",
+    "oauth_expires_at": "2026-09-24T16:10:00Z",
+    "org_uuid": "…",
+    "account_uuid": "…"
+  }
+}
+```
+
+- `400`：缺少 `email`、账号没有 sessionKey，或 `fields` / `format` / `sep` 不合法。
+- `404`：账号不存在。
+- `422`：授权失败（如 sessionKey 已失效——此时账号检测结果会被记为 `dead`——或被 Cloudflare 拦截）。
+- `access_token` 有效期约 8 小时，可用 `refresh_token` 续期；`refresh_token` 只能使用一次，
+  同一份令牌不要交给多个系统同时刷新。需要新令牌时直接再调用本接口即可。
+
+示例：
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" -H "content-type: application/json" \
+  -d '{"email":"alice@example.com"}' "$BASE/accounts/oauth" | jq .account
+```
+
 ### GET /api/v1/fields
 
 返回可导出的字段、默认字段与支持的格式：
@@ -210,7 +253,7 @@ curl -X POST -H "Authorization: Bearer $KEY" \
 ```json
 {
   "fields": [{"key": "email", "title": "邮箱", "label": "email", "default": true, "secret": false}],
-  "formats": ["text", "json", "csv", "line"],
+  "formats": ["text", "json", "csv", "line", "sub2api"],
   "default_fields": ["email", "session_key", "proxy", "mail_base_url", "mail_key"],
   "default_line_sep": "----"
 }
@@ -240,6 +283,7 @@ curl -X POST -H "Authorization: Bearer $KEY" \
 | `text` | 每个账号一段「标签：值」，段间空行；标签见字段表 | `email：a@x.com` 换行 `sessionkey：sk-...` |
 | `csv` | 首行为字段名，UTF-8 带 BOM（Excel 可直接打开） | `email,session_key` 换行 `a@x.com,sk-...` |
 | `line` | 每个账号一行，字段值用 `sep` 连接 | `a@x.com----sk-...` |
+| `sub2api` | sub2api「导入数据」文件（`sub2api-data`，Anthropic · OAuth 账号，含绑定代理）；忽略 `fields`，只含已获取 OAuth 令牌的账号 | `{"type": "sub2api-data", "accounts": [...]}` |
 
 ## 错误
 
@@ -250,9 +294,9 @@ curl -X POST -H "Authorization: Bearer $KEY" \
 | `400` | 参数或请求体不合法（含未知字段、未知格式、代理不存在） |
 | `401` | 缺少或错误的 API Key |
 | `403` | 服务未启用开放 API |
-| `404` | 注册任务不存在；或没有可获取的账号（`accounts/claim`） |
+| `404` | 注册任务不存在；或没有可获取的账号（`accounts/claim`）；或账号不存在（`accounts/oauth`） |
 | `409` | 已有注册任务在运行（响应带 `active_run_id`） |
-| `422` | Query 参数类型或范围错误（如 `wait` 超过 {{MAX_WAIT}}） |
+| `422` | Query 参数类型或范围错误（如 `wait` 超过 {{MAX_WAIT}}）；或 OAuth 授权失败（`accounts/oauth`） |
 
 ## 使用建议
 

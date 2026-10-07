@@ -22,6 +22,7 @@ const FORMATS = [
   ["line", "单行（值用分隔符连接）"],
   ["csv", "CSV（Excel 可打开）"],
   ["json", "JSON"],
+  ["sub2api", "sub2api 导入文件（仅已授权 OAuth 的账号）"],
 ];
 
 const SCOPES = [
@@ -32,7 +33,20 @@ const SCOPES = [
   ["claimed", "仅已获取", { claimed: "true" }],
 ];
 
-const EXT = { text: "txt", line: "txt", csv: "csv", json: "json" };
+const EXT = { text: "txt", line: "txt", csv: "csv", json: "json", sub2api: "json" };
+
+function isEmptyExport(text, format) {
+  const body = text.replace(/^\ufeff/, "").trim();
+  if (!body || (format === "json" && body === "[]")) return true;
+  if (format === "sub2api") {
+    try {
+      return !JSON.parse(body).accounts?.length;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 function loadSaved() {
   try {
@@ -79,22 +93,25 @@ export function ExportDialog({ open, onOpenChange }) {
   }
 
   async function doExport() {
-    if (!fields.length) return toast.error("至少选择一个字段");
+    const sub2api = format === "sub2api";
+    if (!sub2api && !fields.length) return toast.error("至少选择一个字段");
     if (format === "line" && !sep) return toast.error("请填写分隔符");
     setBusy(true);
     try {
-      const params = { fields: fields.join(","), format, ...SCOPES.find(([k]) => k === scope)[2] };
+      const params = { format, ...SCOPES.find(([k]) => k === scope)[2] };
+      if (!sub2api) params.fields = fields.join(",");
       if (format === "line") params.sep = sep;
       const text = await api.exportAccountsText(params);
-      if (!text.replace(/^\ufeff/, "").trim() || (format === "json" && text.trim() === "[]")) {
-        toast.error("没有符合条件的账号");
+      if (isEmptyExport(text, format)) {
+        toast.error(sub2api ? "没有已授权 OAuth 的账号" : "没有符合条件的账号");
         return;
       }
-      const type = { json: "application/json", csv: "text/csv" }[format] || "text/plain";
+      const type = { json: "application/json", sub2api: "application/json", csv: "text/csv" }[format]
+        || "text/plain";
       const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
       const a = document.createElement("a");
       a.href = url;
-      a.download = `accounts.${EXT[format]}`;
+      a.download = sub2api ? "sub2api-accounts.json" : `accounts.${EXT[format]}`;
       a.click();
       URL.revokeObjectURL(url);
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ fields, format, sep, scope }));
@@ -117,6 +134,13 @@ export function ExportDialog({ open, onOpenChange }) {
           <div className="text-sm text-muted-foreground">加载中…</div>
         ) : (
           <div className="space-y-4 text-sm">
+            {format === "sub2api" ? (
+              <div className="rounded-md border bg-muted/30 p-2.5 text-xs text-muted-foreground">
+                生成 sub2api 的「导入数据」文件（Anthropic · OAuth 账号，含账号绑定的代理），
+                只包含已获取 OAuth 令牌的账号。导入后由 sub2api 自行刷新令牌；refresh_token
+                只能使用一次，同一份令牌不要同时导入多个系统。
+              </div>
+            ) : (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label>导出字段</Label>
@@ -142,6 +166,7 @@ export function ExportDialog({ open, onOpenChange }) {
                 ))}
               </div>
             </div>
+            )}
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <Label htmlFor="export-format">格式</Label>

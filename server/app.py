@@ -17,10 +17,11 @@ from claude_register import flow
 from claude_register.accounts import AccountRecord
 from claude_register.anymail import AnyMailAccessError, AnyMailClient
 from claude_register.console import log
+from claude_register.oauth import OAuthError
 from claude_register.proxy_pool import ProxyPool, XuiNode
 from claude_register.session_check import check_session, probe_session
 from claude_register.xui import XuiClient
-from server import auth, db, export, open_api, sk_import
+from server import auth, db, export, oauth_acquire, open_api, sk_import
 from server.config_store import save_config, to_dict
 from server.deps import AppState, default_now
 from server.runner import RunnerBusy
@@ -435,6 +436,26 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         )
         db.update_account_check(state.conn, email, status, checked_at)
         return {"status": status, "detail": detail, "checked_at": checked_at}
+
+    @app.post("/api/accounts/{email}/oauth")
+    async def account_oauth(email: str, _=Depends(require_auth)):
+        """用账号的 sessionKey 自动完成 Claude OAuth 授权，令牌写库并返回账号行。"""
+        row = db.get_account(state.conn, email)
+        if row is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if not row.get("session_key"):
+            raise HTTPException(status_code=400, detail="该账号无 sessionKey")
+        try:
+            row = await asyncio.to_thread(
+                oauth_acquire.acquire, state.conn, email, now=state.now_fn(),
+            )
+        except oauth_acquire.AccountNotFound:
+            raise HTTPException(status_code=404, detail="账号不存在") from None
+        except OAuthError as exc:
+            log(f"OAuth 授权失败：{email}：{exc}")
+            raise HTTPException(status_code=422, detail=f"OAuth 授权失败：{exc}") from None
+        log(f"已获取 OAuth 令牌：{email}（过期 {row.get('oauth_expires_at') or '未知'}）")
+        return {**row, "text": _account_text(row)}
 
     @app.post("/api/takeover/start")
     async def takeover_start(request: Request, _=Depends(require_auth)):
