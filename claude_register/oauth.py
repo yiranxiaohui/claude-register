@@ -5,6 +5,7 @@ access_token / refresh_token。
 全程不开浏览器：
 
 1. GET  https://claude.ai/api/organizations               （sessionKey Cookie）取组织 UUID
+   （可指定组织/工作空间；不指定时沿用上次授权的组织，否则 team 优先、再取第一个）
 2. 本地生成 PKCE：code_verifier / code_challenge(S256) / state
 3. POST https://claude.ai/v1/oauth/{org}/authorize        （sessionKey Cookie）拿授权码
 4. POST https://platform.claude.com/v1/oauth/token        用授权码 + code_verifier 换令牌
@@ -60,6 +61,7 @@ class OAuthTokens:
     org_uuid: str
     account_uuid: str
     email_address: str
+    org_name: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -104,8 +106,7 @@ def _http_error(step: str, resp) -> OAuthError:
     return OAuthError(f"{step}：HTTP {resp.status_code} {_short(resp)}".rstrip())
 
 
-def pick_org_uuid(payload) -> str:
-    """多个组织时优先 raven_type == "team"，否则取第一个（与 sub2api 相同）。"""
+def _org_list(payload) -> list[dict]:
     if isinstance(payload, dict):
         payload = payload.get("organizations")
     if not isinstance(payload, list):
@@ -113,10 +114,49 @@ def pick_org_uuid(payload) -> str:
     orgs = [o for o in payload if isinstance(o, dict) and o.get("uuid")]
     if not orgs:
         raise OAuthError("获取组织：账号下没有组织")
+    return orgs
+
+
+def _default_org(orgs: list[dict]) -> dict:
+    """多个组织时优先 raven_type == "team"，否则取第一个（与 sub2api 相同）。"""
     for org in orgs:
         if org.get("raven_type") == "team":
-            return str(org["uuid"])
-    return str(orgs[0]["uuid"])
+            return org
+    return orgs[0]
+
+
+def pick_org_uuid(payload, org_uuid: str | None = None, preferred: str | None = None) -> str:
+    """选出授权用的组织（工作空间）。
+
+    org_uuid：明确指定，必须在账号的组织列表里，否则报错；
+    preferred：偏好（如上次授权的组织），存在则用，不存在就退回默认规则；
+    都没有时按默认规则（team 优先，否则第一个）。
+    """
+    orgs = _org_list(payload)
+    uuids = [str(o["uuid"]) for o in orgs]
+    if org_uuid:
+        if str(org_uuid) not in uuids:
+            raise OAuthError("所选组织不在该账号的组织列表中（可能已被移出），请刷新后重选")
+        return str(org_uuid)
+    if preferred and str(preferred) in uuids:
+        return str(preferred)
+    return str(_default_org(orgs)["uuid"])
+
+
+def summarize_orgs(payload) -> list[dict]:
+    """组织列表的展示摘要（不含任何凭据），供面板选择工作空间。"""
+    out = []
+    for org in _org_list(payload):
+        caps = org.get("capabilities")
+        out.append({
+            "uuid": str(org["uuid"]),
+            "name": str(org.get("name") or ""),
+            "raven_type": str(org.get("raven_type") or ""),
+            "capabilities": [str(c) for c in caps] if isinstance(caps, list) else [],
+            "rate_limit_tier": str(org.get("rate_limit_tier") or ""),
+            "billing_type": str(org.get("billing_type") or ""),
+        })
+    return out
 
 
 def _claude_headers() -> dict:
@@ -168,7 +208,7 @@ def _authorization_code(client, session_key, org_uuid, challenge, state, timeout
     return code, (query.get("state") or [""])[0]
 
 
-def _parse_tokens(payload, *, org_uuid: str, now: float) -> OAuthTokens:
+def _parse_tokens(payload, *, org_uuid: str, now: float, org_name: str = "") -> OAuthTokens:
     if not isinstance(payload, dict) or not payload.get("access_token"):
         raise OAuthError("换取令牌：响应里没有 access_token")
     try:
@@ -187,6 +227,7 @@ def _parse_tokens(payload, *, org_uuid: str, now: float) -> OAuthTokens:
         org_uuid=str(org.get("uuid") or org_uuid or ""),
         account_uuid=str(acct.get("uuid") or ""),
         email_address=str(acct.get("email_address") or "").strip().lower(),
+        org_name=str(org.get("name") or org_name or ""),
     )
 
 
@@ -206,48 +247,91 @@ def _exchange(client, code, verifier, state, timeout) -> dict:
     return _json(resp)
 
 
-def authorize_with_session_key(
-    session_key: str,
-    proxy: str | None = None,
-    *,
-    timeout: float = DEFAULT_TIMEOUT,
-    client_factory=None,
-    now_fn=time.time,
-) -> OAuthTokens:
-    """用 sessionKey 走完整 OAuth 授权，返回令牌；失败抛 OAuthError（不含任何凭据）。"""
-    if not session_key:
-        raise OAuthError("该账号没有 sessionKey")
+def _open_client(proxy, client_factory):
     try:
         proxy_url = normalize_proxy_url(proxy)
     except Exception:  # noqa: BLE001
         raise OAuthError(f"代理无效：{mask_proxy(proxy or '')}") from None
-
     factory = client_factory or _default_client
     try:
-        client = factory(proxy_url)
+        return factory(proxy_url)
     except Exception as exc:  # noqa: BLE001
         raise OAuthError(f"发起请求失败：{type(exc).__name__}") from None
 
+
+def _fetch_orgs(client, session_key, timeout):
+    resp = client.get(
+        ORG_URL,
+        headers={"Accept": "*/*", "Accept-Language": "en-US,en;q=0.9"},
+        cookies={"sessionKey": session_key},
+        timeout=timeout,
+    )
+    if resp.status_code != 200 or _looks_like_shield(resp):
+        if resp.status_code == 200:
+            raise OAuthError("获取组织：被 Cloudflare 盾拦截", kind="blocked")
+        raise _http_error("获取组织", resp)
+    return _json(resp)
+
+
+def list_organizations(
+    session_key: str,
+    proxy: str | None = None,
+    *,
+    preferred: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    client_factory=None,
+) -> dict:
+    """列出 sessionKey 所属账号的组织（工作空间）。
+
+    返回 {"organizations": [...摘要], "default": 不指定组织时会用的 uuid}。
+    """
+    if not session_key:
+        raise OAuthError("该账号没有 sessionKey")
+    client = _open_client(proxy, client_factory)
     try:
         with client:
-            resp = client.get(
-                ORG_URL,
-                headers={"Accept": "*/*", "Accept-Language": "en-US,en;q=0.9"},
-                cookies={"sessionKey": session_key},
-                timeout=timeout,
-            )
-            if resp.status_code != 200 or _looks_like_shield(resp):
-                if resp.status_code == 200:
-                    raise OAuthError("获取组织：被 Cloudflare 盾拦截", kind="blocked")
-                raise _http_error("获取组织", resp)
-            org_uuid = pick_org_uuid(_json(resp))
+            payload = _fetch_orgs(client, session_key, timeout)
+    except OAuthError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OAuthError(f"请求失败：{type(exc).__name__}") from None
+    return {
+        "organizations": summarize_orgs(payload),
+        "default": pick_org_uuid(payload, preferred=preferred),
+    }
+
+
+def authorize_with_session_key(
+    session_key: str,
+    proxy: str | None = None,
+    *,
+    org_uuid: str | None = None,
+    preferred_org: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    client_factory=None,
+    now_fn=time.time,
+) -> OAuthTokens:
+    """用 sessionKey 走完整 OAuth 授权，返回令牌；失败抛 OAuthError（不含任何凭据）。
+
+    org_uuid 指定授权到哪个组织（工作空间）；preferred_org 为软偏好，见 pick_org_uuid。
+    """
+    if not session_key:
+        raise OAuthError("该账号没有 sessionKey")
+    client = _open_client(proxy, client_factory)
+
+    try:
+        with client:
+            orgs_payload = _fetch_orgs(client, session_key, timeout)
+            org = pick_org_uuid(orgs_payload, org_uuid=org_uuid, preferred=preferred_org)
+            org_name = next((o.get("name") or "" for o in _org_list(orgs_payload)
+                             if str(o["uuid"]) == org), "")
             verifier, challenge, state = generate_pkce()
             code, code_state = _authorization_code(
-                client, session_key, org_uuid, challenge, state, timeout,
+                client, session_key, org, challenge, state, timeout,
             )
             payload = _exchange(client, code, verifier, code_state or state, timeout)
     except OAuthError:
         raise
     except Exception as exc:  # noqa: BLE001 — 网络/代理异常，类型名足够定位且不泄露凭据
         raise OAuthError(f"请求失败：{type(exc).__name__}") from None
-    return _parse_tokens(payload, org_uuid=org_uuid, now=now_fn())
+    return _parse_tokens(payload, org_uuid=org, now=now_fn(), org_name=str(org_name))

@@ -229,3 +229,17 @@ def test_requires_panel_auth(env):
     anon = TestClient(app)
     assert anon.get("/api/sub2api/accounts").status_code == 401
     assert anon.post("/api/sub2api/accounts/1/reauth").status_code == 401
+
+
+def test_reauth_keeps_sub2api_org_or_uses_selected(env):
+    app, c, fake = env
+    fake.accounts[1]["extra"]["org_uuid"] = "org-seat"
+    listed = {a["id"]: a for a in c.get("/api/sub2api/accounts").json()["accounts"]}
+    assert listed[1]["org_uuid"] == "org-seat"
+    with mock.patch.object(oauth, "authorize_with_session_key", return_value=_tokens()) as m:
+        assert c.post("/api/sub2api/accounts/1/reauth").status_code == 200
+        assert m.call_args.kwargs == {"preferred_org": "org-seat"}
+        r = c.post("/api/sub2api/accounts/1/reauth", json={"org_uuid": "org-team"})
+        assert r.status_code == 200, r.text
+        assert m.call_args.kwargs == {"org_uuid": "org-team"}
+    assert c.post("/api/sub2api/accounts/1/reauth", json={"org_uuid": 3}).status_code == 400

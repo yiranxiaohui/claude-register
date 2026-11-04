@@ -437,9 +437,36 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         db.update_account_check(state.conn, email, status, checked_at)
         return {"status": status, "detail": detail, "checked_at": checked_at}
 
+    @app.get("/api/accounts/{email}/oauth/organizations")
+    async def account_oauth_orgs(email: str, preferred: str | None = None,
+                                 _=Depends(require_auth)):
+        """列出账号可授权的组织（工作空间），供授权前选择。
+
+        preferred：偏好的组织 uuid（影响返回的 default），不填时用账号上次授权的组织。
+        """
+        row = db.get_account(state.conn, email)
+        if row is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if not row.get("session_key"):
+            raise HTTPException(status_code=400, detail="该账号无 sessionKey")
+        try:
+            return await asyncio.to_thread(
+                oauth_acquire.list_orgs, state.conn, email, now=state.now_fn(),
+                preferred=(preferred or "").strip()[:128] or None,
+            )
+        except oauth_acquire.AccountNotFound:
+            raise HTTPException(status_code=404, detail="账号不存在") from None
+        except OAuthError as exc:
+            log(f"获取组织列表失败：{email}：{exc}")
+            raise HTTPException(status_code=422, detail=f"获取组织列表失败：{exc}") from None
+
     @app.post("/api/accounts/{email}/oauth")
-    async def account_oauth(email: str, _=Depends(require_auth)):
-        """用账号的 sessionKey 自动完成 Claude OAuth 授权，令牌写库并返回账号行。"""
+    async def account_oauth(email: str, request: Request, _=Depends(require_auth)):
+        """用账号的 sessionKey 自动完成 Claude OAuth 授权，令牌写库并返回账号行。
+
+        body 可选 {"org_uuid": "..."} 指定授权的组织（工作空间）。
+        """
+        org_uuid = await oauth_acquire.read_org_uuid(request)
         row = db.get_account(state.conn, email)
         if row is None:
             raise HTTPException(status_code=404, detail="账号不存在")
@@ -448,6 +475,7 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
         try:
             row = await asyncio.to_thread(
                 oauth_acquire.acquire, state.conn, email, now=state.now_fn(),
+                org_uuid=org_uuid,
             )
         except oauth_acquire.AccountNotFound:
             raise HTTPException(status_code=404, detail="账号不存在") from None

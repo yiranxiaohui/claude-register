@@ -100,6 +100,30 @@ class ClaimResult(BaseModel):
 class OAuthRequest(BaseModel):
     email: str = Field(description="要授权的账号邮箱（必须已入库且有 sessionKey）",
                        examples=["alice@example.com"])
+    org_uuid: str | None = Field(
+        None, description="授权到哪个组织（工作空间），取值见 POST /api/v1/accounts/organizations；"
+                          "不填时沿用该账号上次授权的组织，否则 team 优先、再取第一个")
+
+
+class OrgsRequest(BaseModel):
+    email: str = Field(description="账号邮箱（必须已入库且有 sessionKey）",
+                       examples=["alice@example.com"])
+
+
+class OrgItem(BaseModel):
+    uuid: str
+    name: str = Field(description="组织（工作空间）名称")
+    raven_type: str = Field(description="组织类型（如 team；个人组织通常为空）")
+    capabilities: list[str]
+    rate_limit_tier: str
+    billing_type: str
+
+
+class OrgsResult(BaseModel):
+    email: str
+    organizations: list[OrgItem]
+    default: str = Field(description="不指定 org_uuid 时授权会用的组织 uuid")
+    current: str = Field(description="该账号上次授权的组织 uuid（未授权过为空）")
 
 
 class OAuthResult(BaseModel):
@@ -119,7 +143,7 @@ OAUTH_DEFAULT_FIELDS = ("email", "access_token", "refresh_token", "oauth_expires
 
 DOC_MODELS = (RegisterRequest, RegisterAccepted, RegisterBusy, RegisterResult,
               ErrorResponse, FieldInfo, FieldsInfo, ProxyItem, ClaimResult,
-              OAuthRequest, OAuthResult)
+              OAuthRequest, OAuthResult, OrgsRequest, OrgItem, OrgsResult)
 _AUTH_ERRORS = {
     401: {"model": ErrorResponse, "description": "缺少或错误的 API Key"},
     403: {"model": ErrorResponse, "description": "服务未启用开放 API"},
@@ -376,6 +400,49 @@ def register_open_api(app: FastAPI, state, *, start_registration, account_rows) 
             result["export"] = export.render([acct], keys, fmt, sep=line_sep)[0]
         return result
 
+    def account_with_sk(body) -> dict:
+        email = body.get("email") if isinstance(body, dict) else None
+        if not isinstance(email, str) or not email.strip():
+            raise HTTPException(status_code=400, detail="email 必须是非空字符串")
+        email = email.strip()
+        row = db.get_account(state.conn, email) or db.get_account(state.conn, email.lower())
+        if row is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if not row.get("session_key"):
+            raise HTTPException(status_code=400, detail="该账号无 sessionKey")
+        return row
+
+    @app.post(
+        "/api/v1/accounts/organizations", tags=["OAuth"],
+        summary="列出账号可授权的组织（工作空间）",
+        response_model=OrgsResult,
+        responses={
+            400: {"model": ErrorResponse, "description": "参数不合法或账号无 sessionKey"},
+            404: {"model": ErrorResponse, "description": "账号不存在"},
+            422: {"model": ErrorResponse, "description": "获取失败（sessionKey 失效、被拦截等）"},
+            **_AUTH_ERRORS,
+        },
+        openapi_extra={"requestBody": {"required": True, "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/OrgsRequest"}}}}},
+    )
+    async def v1_accounts_orgs(request: Request, _=Depends(require_api_key)):
+        """用账号保存的 sessionKey（经账号绑定的代理）列出它所属的组织（工作空间），
+        把其中的 uuid 作为 org_uuid 传给 POST /api/v1/accounts/oauth 即可授权到指定组织。"""
+        try:
+            body = await request.json() if await request.body() else {}
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+        row = account_with_sk(body)
+        try:
+            result = await asyncio.to_thread(
+                oauth_acquire.list_orgs, state.conn, row["email"], now=state.now_fn(),
+            )
+        except oauth_acquire.AccountNotFound:
+            raise HTTPException(status_code=404, detail="账号不存在") from None
+        except OAuthError as exc:
+            raise HTTPException(status_code=422, detail=f"获取组织列表失败：{exc}") from None
+        return {"email": row["email"], **result}
+
     @app.post(
         "/api/v1/accounts/oauth", tags=["OAuth"], summary="用 sessionKey 获取 Claude OAuth 令牌",
         responses={
@@ -409,19 +476,14 @@ def register_open_api(app: FastAPI, state, *, start_registration, account_rows) 
             body = await request.json() if await request.body() else {}
         except Exception:  # noqa: BLE001
             raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
-        email = body.get("email") if isinstance(body, dict) else None
-        if not isinstance(email, str) or not email.strip():
-            raise HTTPException(status_code=400, detail="email 必须是非空字符串")
-        email = email.strip()
-        row = db.get_account(state.conn, email) or db.get_account(state.conn, email.lower())
-        if row is None:
-            raise HTTPException(status_code=404, detail="账号不存在")
+        row = account_with_sk(body)
         email = row["email"]
-        if not row.get("session_key"):
-            raise HTTPException(status_code=400, detail="该账号无 sessionKey")
+        org_uuid = oauth_acquire.parse_org_uuid(
+            {"org_uuid": body.get("org_uuid")} if isinstance(body, dict) else None)
         try:
             acct = await asyncio.to_thread(
                 oauth_acquire.acquire, state.conn, email, now=state.now_fn(),
+                org_uuid=org_uuid,
             )
         except oauth_acquire.AccountNotFound:
             raise HTTPException(status_code=404, detail="账号不存在") from None

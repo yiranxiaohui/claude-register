@@ -7,6 +7,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { ExportDialog } from "@/components/export-dialog";
 import { ImportDialog } from "@/components/import-dialog";
 import { ManualLoginDialog } from "@/components/manual-login-dialog";
+import { useOrgPicker } from "@/components/org-select-dialog";
 import {
   AccountCreateDialog,
   AccountFields,
@@ -124,7 +125,9 @@ function OAuthBadge({ acct }) {
         "rounded-full border-transparent",
         expired ? "bg-muted text-muted-foreground" : "bg-sky-500/15 text-sky-400",
       )}
-      title={`OAuth 授权时间：${acct.oauth_at || "未知"}\naccess_token 过期：${acct.oauth_expires_at || "未知"}`}
+      title={`OAuth 授权时间：${acct.oauth_at || "未知"}\naccess_token 过期：${acct.oauth_expires_at || "未知"}${
+        acct.org_name ? `\n组织：${acct.org_name}` : ""
+      }`}
     >
       OAuth
       {acct.oauth_expires_at ? (
@@ -137,6 +140,7 @@ function OAuthBadge({ acct }) {
 const OAUTH_COPY_FIELDS = [
   ["access_token", "access_token"],
   ["refresh_token", "refresh_token"],
+  ["org_name", "组织名称"],
   ["org_uuid", "组织 UUID"],
   ["account_uuid", "账号 UUID"],
 ];
@@ -145,6 +149,7 @@ export default function Accounts({ attach, running, navigate }) {
   const [accounts, setAccounts] = useState([]);
   const [authorizing, setAuthorizing] = useState(() => new Set());
   const [batchOAuth, setBatchOAuth] = useState(null); // {done, total, ok, failed}
+  const orgPicker = useOrgPicker();
   const [takeover, setTakeover] = useState({ running: false, email: null });
   const [relogging, setRelogging] = useState(false);
   const [checking, setChecking] = useState("");
@@ -300,12 +305,23 @@ export default function Accounts({ attach, running, navigate }) {
     });
 
   // 用 sessionKey 获取 OAuth 令牌；成功返回 true。quiet 时不弹成功提示（批量用）。
-  async function runOAuth(acctEmail, { quiet = false } = {}) {
+  // pickOrg 时先取账号的组织列表，多个组织则弹窗选择工作空间；批量授权不弹窗，
+  // 由后端沿用上次授权的组织（没有则 team 优先）。
+  async function runOAuth(acctEmail, { quiet = false, pickOrg = false } = {}) {
     setAuthorizingFlag(acctEmail, true);
     try {
-      const row = await api.accountOAuth(acctEmail);
+      let orgUuid;
+      if (pickOrg) {
+        orgUuid = await orgPicker.pick(acctEmail);
+        if (orgUuid === undefined) return false; // 取消选择
+      }
+      const row = await api.accountOAuth(acctEmail, orgUuid);
       setAccounts((list) => list.map((a) => (a.email === acctEmail ? { ...a, ...row } : a)));
-      if (!quiet) toast.success(`「${acctEmail}」已获取 OAuth 令牌`);
+      if (!quiet) {
+        toast.success(
+          `「${acctEmail}」已获取 OAuth 令牌${row.org_name ? `（${row.org_name}）` : ""}`,
+        );
+      }
       return true;
     } catch (e) {
       if (e?.status === 401) return false;
@@ -722,8 +738,8 @@ export default function Accounts({ attach, running, navigate }) {
                         <Button
                           variant="outline"
                           size="sm"
-                          title="用 sessionKey 自动完成 Claude OAuth 授权，获取 access_token / refresh_token"
-                          onClick={() => runOAuth(a.email)}
+                          title="用 sessionKey 自动完成 Claude OAuth 授权，获取 access_token / refresh_token；账号属于多个组织时可选择工作空间"
+                          onClick={() => runOAuth(a.email, { pickOrg: true })}
                           disabled={authorizing.has(a.email)}
                         >
                           {authorizing.has(a.email)
@@ -849,6 +865,7 @@ export default function Accounts({ attach, running, navigate }) {
         onStarted={() => api.takeoverStatus().then(setTakeover).catch(() => {})}
       />
       <ImportDialog open={importOpen} onOpenChange={setImportOpen} onImported={refreshLists} />
+      {orgPicker.dialog}
     </>
   );
 }

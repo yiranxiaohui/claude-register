@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   mail_key TEXT, mail_base_url TEXT,
   check_status TEXT, checked_at TEXT, claimed_at TEXT,
   access_token TEXT, refresh_token TEXT, oauth_expires_at TEXT, oauth_scope TEXT,
-  org_uuid TEXT, account_uuid TEXT, oauth_at TEXT
+  org_uuid TEXT, account_uuid TEXT, oauth_at TEXT, org_name TEXT
 );
 """
 
@@ -40,6 +40,7 @@ _ACCOUNT_EXTRA_COLS = (
     ("org_uuid", "TEXT"),
     ("account_uuid", "TEXT"),
     ("oauth_at", "TEXT"),
+    ("org_name", "TEXT"),
 )
 
 
@@ -231,7 +232,7 @@ def update_account_check(conn, email, status, checked_at) -> bool:
 
 OAUTH_FIELDS = (
     "access_token", "refresh_token", "oauth_expires_at", "oauth_scope",
-    "org_uuid", "account_uuid", "oauth_at",
+    "org_uuid", "account_uuid", "oauth_at", "org_name",
 )
 
 
