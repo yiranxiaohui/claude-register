@@ -74,7 +74,8 @@ else:
 | `GET` | `/api/v1/register/{run_id}` | 查询注册结果（支持长轮询、字段选择） |
 | `GET` | `/api/v1/accounts/export` | 批量导出账号 |
 | `POST` | `/api/v1/accounts/claim` | 获取一个账号并标记为已获取 |
-| `POST` | `/api/v1/accounts/oauth` | 用账号的 sessionKey 获取 Claude OAuth 令牌 |
+| `POST` | `/api/v1/accounts/organizations` | 列出账号可授权的组织（工作空间） |
+| `POST` | `/api/v1/accounts/oauth` | 用账号的 sessionKey 获取 Claude OAuth 令牌（可指定组织） |
 | `GET` | `/api/v1/fields` | 可导出的字段与格式 |
 | `GET` | `/api/v1/proxies` | 可选的注册代理 |
 
@@ -204,13 +205,51 @@ curl -X POST -H "Authorization: Bearer $KEY" \
   "$BASE/accounts/claim?format=line&fields=email,session_key" | jq -r .export
 ```
 
+### POST /api/v1/accounts/organizations
+
+一个 Claude 账号可能属于多个组织（工作空间），例如个人组织和学校 / 团队的
+「Premium Seat」组织。本接口用账号保存的 sessionKey（经账号绑定的代理）列出这些组织，
+供授权前选择。
+
+请求体：`{"email": "alice@example.com"}`（账号必须已入库且有 sessionKey）。
+
+响应：
+
+```json
+{
+  "email": "alice@example.com",
+  "organizations": [
+    {"uuid": "…", "name": "Northeastern University", "raven_type": "team",
+     "capabilities": ["chat", "raven"], "rate_limit_tier": "…", "billing_type": "…"},
+    {"uuid": "…", "name": "Premium Seat - Northeastern University", "raven_type": "team",
+     "capabilities": ["chat", "raven"], "rate_limit_tier": "…", "billing_type": "…"}
+  ],
+  "default": "…",
+  "current": "…"
+}
+```
+
+- `default`：调用 `accounts/oauth` 时不传 `org_uuid` 会使用的组织。
+- `current`：该账号上次授权的组织（没授权过为空字符串）。
+- 错误码同 `accounts/oauth`（`400` / `404` / `422`）。
+
+示例：
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" -H "content-type: application/json" \
+  -d '{"email":"alice@example.com"}' "$BASE/accounts/organizations" | jq .organizations
+```
+
 ### POST /api/v1/accounts/oauth
 
 用账号保存的 sessionKey（经账号绑定的代理）自动完成**完整的 Claude OAuth 授权**（PKCE，
 与 sub2api「Cookie 自动授权」相同的流程），返回 `access_token` / `refresh_token` 并写入账号。
 每次调用都会重新授权并覆盖该账号之前保存的令牌。
 
-请求体：`{"email": "alice@example.com"}`（账号必须已入库且有 sessionKey）。
+请求体：`{"email": "alice@example.com", "org_uuid": "…"}`（账号必须已入库且有 sessionKey）。
+`org_uuid` 可选，指定授权到哪个组织（工作空间），取值来自 `POST /api/v1/accounts/organizations`；
+不填时沿用该账号上次授权的组织，没有则优先 `raven_type` 为 `team` 的组织，再取第一个。
+指定的组织不在账号的组织列表里时返回 `422`。
 
 Query 参数：`fields`（默认 `email,access_token,refresh_token,oauth_expires_at,org_uuid,account_uuid`）、
 `format`（默认 `json`；`text` / `csv` / `line` / `sub2api` 时额外返回 `export` 文本）、`sep`。
@@ -235,7 +274,9 @@ Query 参数：`fields`（默认 `email,access_token,refresh_token,oauth_expires
 
 - `400`：缺少 `email`、账号没有 sessionKey，或 `fields` / `format` / `sep` 不合法。
 - `404`：账号不存在。
-- `422`：授权失败（如 sessionKey 已失效——此时账号检测结果会被记为 `dead`——或被 Cloudflare 拦截）。
+- `422`：授权失败（如 sessionKey 已失效——此时账号检测结果会被记为 `dead`——或被 Cloudflare 拦截，
+  或指定的 `org_uuid` 不属于该账号）。
+- `fields` 还可选 `org_name`（授权组织 / 工作空间的名称）。
 - `access_token` 有效期约 8 小时，可用 `refresh_token` 续期；`refresh_token` 只能使用一次，
   同一份令牌不要交给多个系统同时刷新。需要新令牌时直接再调用本接口即可。
 

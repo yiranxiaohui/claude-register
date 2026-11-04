@@ -87,7 +87,7 @@ docker compose up -d
 账号有 `sessionKey` 时，可以直接换取完整的 Claude OAuth 令牌，流程与 sub2api 的
 「Cookie 自动授权」一致，全程不开浏览器：
 
-1. `GET https://claude.ai/api/organizations` 取组织 UUID（有 team 组织时优先）；
+1. `GET https://claude.ai/api/organizations` 取组织（工作空间）列表，确定授权到哪个组织；
 2. 本地生成 PKCE（`code_verifier` / S256 `code_challenge` / `state`）；
 3. `POST https://claude.ai/v1/oauth/{org}/authorize` 用 sessionKey 拿授权码；
 4. `POST https://platform.claude.com/v1/oauth/token` 换取 `access_token` / `refresh_token`。
@@ -96,12 +96,18 @@ scope 为 `user:profile user:inference user:sessions:claude_code user:mcp_server
 （内部授权接口不支持 `org:create_api_key`）。claude.ai 请求使用浏览器 TLS 指纹，并走账号绑定的代理。
 
 - 账号页每行的「OAuth」按钮为单个账号授权（已授权时显示「重新授权」），勾选后可「获取 OAuth」批量授权；
-  「编辑」展开后可复制 access_token / refresh_token / 组织与账号 UUID。筛选里可按是否已授权过滤。
+  「编辑」展开后可复制 access_token / refresh_token / 组织名称与 UUID / 账号 UUID。筛选里可按是否已授权过滤。
+- **选择组织（工作空间）**：一个 Claude 账号可能同时属于多个组织（如学校的
+  「Northeastern University」与「Premium Seat - Northeastern University」）。单个授权 / 重新授权时，
+  账号有多个组织就会弹窗让你选，令牌的额度与权限取决于所选组织；只有一个组织时直接授权。
+  不选（批量授权、注册后自动授权、开放 API 不传 `org_uuid`）时，沿用该账号上次授权的组织，
+  没有则优先 `raven_type` 为 `team` 的组织，再取第一个。
 - 「系统设置 → 注册参数」勾选「注册成功后自动获取 Claude OAuth 令牌」后，每次注册拿到 sessionKey 会自动授权；
   授权失败只记日志，不影响注册结果。
 - 导出新增字段 `access_token`、`refresh_token`、`oauth_expires_at`、`oauth_scope`、`org_uuid`、`account_uuid`、
-  `oauth_at`，以及 `sub2api` 格式：直接生成 sub2api「导入数据」文件（Anthropic · OAuth 账号，附带绑定代理）。
-- 开放 API：`POST /api/v1/accounts/oauth`（body `{"email": ...}`）返回并保存令牌。
+  `oauth_at`、`org_name`，以及 `sub2api` 格式：直接生成 sub2api「导入数据」文件（Anthropic · OAuth 账号，附带绑定代理）。
+- 开放 API：`POST /api/v1/accounts/organizations`（body `{"email": ...}`）列出组织；
+  `POST /api/v1/accounts/oauth`（body `{"email": ..., "org_uuid": 可选}`）返回并保存令牌。
 - `access_token` 约 8 小时过期；`refresh_token` 只能用一次，导入 sub2api 后由 sub2api 负责刷新，
   不要把同一份令牌同时交给多个系统。sessionKey 失效时授权返回 422，并把账号检测结果记为失效。
 
@@ -116,7 +122,8 @@ sub2api 里的 Claude OAuth 账号 refresh_token 失效（如 `invalid_grant`）
    令牌过期时间，并按 `extra.email_address`（缺失时取账号名称里的邮箱）对应到本地账号。
 3. 单个点「重新授权」，或勾选后「重新授权所选」：用本地 sessionKey 走账号绑定的代理获取新令牌，
    再调用 sub2api 的 `POST /api/v1/admin/accounts/{id}/apply-oauth-credentials` 写回同一个账号——
-   只替换令牌，保留并发、分组、模型映射等配置，并自动清除异常状态。
+   只替换令牌，保留并发、分组、模型映射等配置，并自动清除异常状态。单个重新授权时，账号属于多个组织
+   会弹窗选择工作空间（默认选中该 sub2api 账号原来的组织）；批量时直接沿用原来的组织。
 
 安全措施：新令牌所属的 Claude 邮箱必须与 sub2api 账号一致，否则不写库也不推送；本地无对应账号或
 无 sessionKey 的不能重新授权；sessionKey 已失效时返回失败并把本地检测结果记为失效。只能手动触发，
@@ -152,7 +159,8 @@ X-API-Key: <key>
 | `GET /api/v1/register/{run_id}` | 查询结果。`wait`（0–50 秒）长轮询；`fields` 选择返回字段；`format=text/csv/line` 时额外返回 `export` 文本（`line` 可用 `sep` 指定分隔符，默认 `----`） |
 | `GET /api/v1/accounts/export` | 批量导出。`fields`、`format`（`json` 默认 / `text` / `csv` / `line`）、`sep`，过滤：`status`（`success`/`needs_manual`）、`check_status`（`alive`/`dead`/…）、`claimed`（`true`/`false`）、`emails`（逗号分隔）。响应头 `X-Total-Count` 为条数 |
 | `POST /api/v1/accounts/claim` | 获取一个账号：每次返回一个注册成功、有 sessionKey、未获取过的账号（默认跳过检测为 `dead`/`blocked` 的，`check_status=alive` 可只取有效的），并标记为「已获取」，不会重复发放。支持 `fields`/`format`/`sep`；返回 `account`、`claimed_at`、`remaining`；没有可用账号返回 `404`。面板账号列表显示「已获取」标签，可在「编辑」里取消标记 |
-| `POST /api/v1/accounts/oauth` | 用账号的 sessionKey 获取 Claude OAuth 令牌并保存。body `{"email"}`；`fields` 默认 OAuth 令牌字段；授权失败返回 `422` |
+| `POST /api/v1/accounts/organizations` | 列出账号可授权的组织（工作空间）。body `{"email"}`；返回 `organizations`、`default`、`current` |
+| `POST /api/v1/accounts/oauth` | 用账号的 sessionKey 获取 Claude OAuth 令牌并保存。body `{"email", "org_uuid"?}`；`fields` 默认 OAuth 令牌字段；授权失败返回 `422` |
 | `GET /api/v1/fields` | 可选字段与格式 |
 | `GET /api/v1/proxies` | 代理池里的 `id` 与名称（不返回地址和凭据） |
 
@@ -162,7 +170,7 @@ sessionKey（账号已入库，可在面板接管）、`failed` 失败；后两�
 可选字段（`fields`，逗号分隔，按给出的顺序输出）：`email`、`session_key`、`proxy`、`mail_base_url`、
 `mail_key`、`password`、`display_name`、`domain`、`status`、`check_status`、`checked_at`、`created_at`、
 `claimed_at`、`last_run_id`、`access_token`、`refresh_token`、`oauth_expires_at`、`oauth_scope`、`org_uuid`、
-`account_uuid`、`oauth_at`。默认是前五项，`text` 格式与面板「导出」的默认输出一致。
+`org_name`、`account_uuid`、`oauth_at`。默认是前五项，`text` 格式与面板「导出」的默认输出一致。
 
 示例：触发注册 → 等到完成 → 取邮箱 + sessionKey + 密码：
 

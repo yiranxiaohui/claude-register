@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { useOrgPicker } from "@/components/org-select-dialog";
 
 const STATUS = {
   active: ["正常", "bg-emerald-500/15 text-emerald-400"],
@@ -65,6 +66,7 @@ export default function Sub2API({ navigate }) {
   const [selected, setSelected] = useState(() => new Set());
   const [busy, setBusy] = useState(() => new Set());
   const [batch, setBatch] = useState(null); // {done,total}
+  const orgPicker = useOrgPicker();
 
   async function load() {
     setLoading(true);
@@ -100,10 +102,17 @@ export default function Sub2API({ navigate }) {
     });
 
   // 重新授权并写回 sub2api；成功返回 true。quiet（批量）时不弹成功提示，失败始终提示原因。
-  async function reauth(a, { quiet = false } = {}) {
+  // pickOrg 时账号属于多个组织就弹窗选择工作空间（默认选中该 sub2api 账号原来的组织）；
+  // 批量时不弹窗，后端沿用原来的组织。
+  async function reauth(a, { quiet = false, pickOrg = false } = {}) {
     setBusyFlag(a.id, true);
     try {
-      const res = await api.sub2apiReauth(a.id);
+      let orgUuid;
+      if (pickOrg) {
+        orgUuid = await orgPicker.pick(a.local.email, { preferred: a.org_uuid });
+        if (orgUuid === undefined) return false; // 取消选择
+      }
+      const res = await api.sub2apiReauth(a.id, orgUuid);
       setData((d) =>
         d && {
           ...d,
@@ -163,136 +172,139 @@ export default function Sub2API({ navigate }) {
     });
 
   return (
-    <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
-        <CardTitle>sub2api 同步</CardTitle>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading || !!batch}>
-          <RefreshCw className={cn(loading && "animate-spin")} /> 刷新
-        </Button>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-xs text-muted-foreground">
-          列出 sub2api 里的 Claude OAuth 账号，按邮箱对应到本地账号。「重新授权」会用本地 sessionKey
-          （经账号绑定的代理）获取新的 OAuth 令牌，并写回 sub2api 的同一个账号：只替换令牌，
-          保留并发、分组、模型映射等配置，同时清除异常状态。
-          {data?.base_url ? <span className="ml-1 font-mono">{data.base_url}</span> : null}
-        </p>
-        {error && (
-          <Alert className="border-red-500/30 bg-red-500/10">
-            <AlertDescription className="flex w-full items-center justify-between gap-2 text-red-400">
-              <span>{error}</span>
-              {/未配置/.test(error) && (
-                <Button variant="outline" size="sm" onClick={() => navigate("settings")}>
-                  去设置
+    <>
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <CardTitle>sub2api 同步</CardTitle>
+          <Button variant="outline" size="sm" onClick={load} disabled={loading || !!batch}>
+            <RefreshCw className={cn(loading && "animate-spin")} /> 刷新
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            列出 sub2api 里的 Claude OAuth 账号，按邮箱对应到本地账号。「重新授权」会用本地 sessionKey
+            （经账号绑定的代理）获取新的 OAuth 令牌，并写回 sub2api 的同一个账号：只替换令牌，
+            保留并发、分组、模型映射等配置，同时清除异常状态。
+            {data?.base_url ? <span className="ml-1 font-mono">{data.base_url}</span> : null}
+          </p>
+          {error && (
+            <Alert className="border-red-500/30 bg-red-500/10">
+              <AlertDescription className="flex w-full items-center justify-between gap-2 text-red-400">
+                <span>{error}</span>
+                {/未配置/.test(error) && (
+                  <Button variant="outline" size="sm" onClick={() => navigate("settings")}>
+                    去设置
+                  </Button>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+          {data && (
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                className="h-9 rounded-md border bg-background px-2 text-sm"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              >
+                {FILTERS.map(([v, label]) => (
+                  <option key={v} value={v}>{label}</option>
+                ))}
+              </select>
+              <label className="flex h-9 cursor-pointer items-center gap-2 px-1 text-sm text-muted-foreground select-none">
+                <input
+                  type="checkbox"
+                  className="size-4 accent-primary"
+                  checked={allSelected}
+                  disabled={fixableVisible.length === 0 || !!batch}
+                  onChange={toggleAll}
+                />
+                全选可修复
+              </label>
+              <span className="text-xs text-muted-foreground">
+                共 {accounts.length} 个，异常 {errorCount} 个，当前显示 {visible.length} 个
+              </span>
+              {selectedFixable.length > 0 && (
+                <Button size="sm" disabled={!!batch} onClick={() => reauthBatch(selectedFixable)}>
+                  <KeyRound />
+                  {batch
+                    ? `处理中 ${batch.done}/${batch.total}…`
+                    : `重新授权所选（${selectedFixable.length}）`}
                 </Button>
               )}
-            </AlertDescription>
-          </Alert>
-        )}
-        {data && (
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              className="h-9 rounded-md border bg-background px-2 text-sm"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            >
-              {FILTERS.map(([v, label]) => (
-                <option key={v} value={v}>{label}</option>
-              ))}
-            </select>
-            <label className="flex h-9 cursor-pointer items-center gap-2 px-1 text-sm text-muted-foreground select-none">
-              <input
-                type="checkbox"
-                className="size-4 accent-primary"
-                checked={allSelected}
-                disabled={fixableVisible.length === 0 || !!batch}
-                onChange={toggleAll}
-              />
-              全选可修复
-            </label>
-            <span className="text-xs text-muted-foreground">
-              共 {accounts.length} 个，异常 {errorCount} 个，当前显示 {visible.length} 个
-            </span>
-            {selectedFixable.length > 0 && (
-              <Button size="sm" disabled={!!batch} onClick={() => reauthBatch(selectedFixable)}>
-                <KeyRound />
-                {batch
-                  ? `处理中 ${batch.done}/${batch.total}…`
-                  : `重新授权所选（${selectedFixable.length}）`}
-              </Button>
-            )}
-          </div>
-        )}
-        {loading && !data ? (
-          <div className="text-sm text-muted-foreground">加载中…</div>
-        ) : data && visible.length === 0 ? (
-          <div className="text-sm text-muted-foreground">
-            {filter === "error" ? "sub2api 里没有异常的 Claude OAuth 账号" : "没有符合条件的账号"}
-          </div>
-        ) : (
-          <ul className="flex flex-col gap-1.5">
-            {visible.map((a) => {
-              const st = STATUS[a.status] || [a.status || "未知", "bg-muted text-muted-foreground"];
-              return (
-                <li
-                  key={a.id}
-                  className={cn(
-                    "flex items-center justify-between gap-2 rounded-lg border bg-background/50 px-3 py-2.5 text-sm",
-                    selected.has(a.id) && "border-primary/60",
-                  )}
-                >
-                  <input
-                    type="checkbox"
-                    className="size-4 shrink-0 accent-primary"
-                    aria-label={`选择 ${a.name}`}
-                    checked={selected.has(a.id)}
-                    disabled={!canFix(a) || !!batch}
-                    onChange={() => toggle(a.id)}
-                  />
-                  <span className="flex min-w-0 flex-1 flex-col gap-1 overflow-hidden">
-                    <span className="flex items-center gap-2">
-                      <span className="truncate" title={a.name}>{a.name}</span>
-                      <span className="shrink-0 text-xs text-muted-foreground">#{a.id}</span>
-                    </span>
-                    <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                      <Badge className={cn("rounded-full border-transparent", st[1])}>{st[0]}</Badge>
-                      <TokenExpiry iso={a.token_expires_at} />
-                      {a.local ? (
-                        <span>
-                          本地：{a.local.email === a.name ? "已对应" : a.local.email}
-                          {a.local.check_status
-                            ? ` · ${LIVE[a.local.check_status] || a.local.check_status}`
-                            : ""}
-                          {a.local.has_session_key ? "" : " · 无 sessionKey"}
-                        </span>
-                      ) : (
-                        <span className="text-amber-400">
-                          {a.email ? `本地没有 ${a.email}` : "无法识别邮箱"}
-                        </span>
-                      )}
-                    </span>
-                    {a.error_message ? (
-                      <span className="truncate text-xs text-red-400/90" title={a.error_message}>
-                        {a.error_message}
-                      </span>
-                    ) : null}
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="shrink-0"
-                    disabled={!canFix(a) || busy.has(a.id) || !!batch}
-                    title={canFix(a) ? "用本地 sessionKey 重新授权并写回 sub2api" : "本地没有可用的 sessionKey"}
-                    onClick={() => reauth(a)}
+            </div>
+          )}
+          {loading && !data ? (
+            <div className="text-sm text-muted-foreground">加载中…</div>
+          ) : data && visible.length === 0 ? (
+            <div className="text-sm text-muted-foreground">
+              {filter === "error" ? "sub2api 里没有异常的 Claude OAuth 账号" : "没有符合条件的账号"}
+            </div>
+          ) : (
+            <ul className="flex flex-col gap-1.5">
+              {visible.map((a) => {
+                const st = STATUS[a.status] || [a.status || "未知", "bg-muted text-muted-foreground"];
+                return (
+                  <li
+                    key={a.id}
+                    className={cn(
+                      "flex items-center justify-between gap-2 rounded-lg border bg-background/50 px-3 py-2.5 text-sm",
+                      selected.has(a.id) && "border-primary/60",
+                    )}
                   >
-                    {busy.has(a.id) ? "授权中…" : "重新授权"}
-                  </Button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </CardContent>
-    </Card>
+                    <input
+                      type="checkbox"
+                      className="size-4 shrink-0 accent-primary"
+                      aria-label={`选择 ${a.name}`}
+                      checked={selected.has(a.id)}
+                      disabled={!canFix(a) || !!batch}
+                      onChange={() => toggle(a.id)}
+                    />
+                    <span className="flex min-w-0 flex-1 flex-col gap-1 overflow-hidden">
+                      <span className="flex items-center gap-2">
+                        <span className="truncate" title={a.name}>{a.name}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">#{a.id}</span>
+                      </span>
+                      <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                        <Badge className={cn("rounded-full border-transparent", st[1])}>{st[0]}</Badge>
+                        <TokenExpiry iso={a.token_expires_at} />
+                        {a.local ? (
+                          <span>
+                            本地：{a.local.email === a.name ? "已对应" : a.local.email}
+                            {a.local.check_status
+                              ? ` · ${LIVE[a.local.check_status] || a.local.check_status}`
+                              : ""}
+                            {a.local.has_session_key ? "" : " · 无 sessionKey"}
+                          </span>
+                        ) : (
+                          <span className="text-amber-400">
+                            {a.email ? `本地没有 ${a.email}` : "无法识别邮箱"}
+                          </span>
+                        )}
+                      </span>
+                      {a.error_message ? (
+                        <span className="truncate text-xs text-red-400/90" title={a.error_message}>
+                          {a.error_message}
+                        </span>
+                      ) : null}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      disabled={!canFix(a) || busy.has(a.id) || !!batch}
+                      title={canFix(a) ? "用本地 sessionKey 重新授权并写回 sub2api" : "本地没有可用的 sessionKey"}
+                      onClick={() => reauth(a, { pickOrg: true })}
+                    >
+                      {busy.has(a.id) ? "授权中…" : "重新授权"}
+                    </Button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+      {orgPicker.dialog}
+    </>
   );
 }

@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 from claude_register.console import log
 from claude_register.oauth import OAuthError
@@ -137,6 +137,13 @@ def apply_payload(row: dict) -> dict:
     return {"type": ACCOUNT_TYPE, "credentials": credentials, "extra": extra}
 
 
+def account_org(acct: dict) -> str:
+    """sub2api 账号原来授权的组织 uuid（extra.org_uuid），没有则为空。"""
+    extra = acct.get("extra")
+    org = extra.get("org_uuid") if isinstance(extra, dict) else ""
+    return str(org or "").strip()
+
+
 def account_email(acct: dict) -> str:
     """sub2api 账号对应的 Claude 邮箱：优先 extra.email_address，其次名称里的邮箱。"""
     extra = acct.get("extra") if isinstance(acct.get("extra"), dict) else {}
@@ -172,6 +179,7 @@ def summarize(acct: dict, local: dict | None) -> dict:
         "token_expires_at": _iso(creds.get("expires_at")),
         "has_refresh_token": bool(status.get("has_refresh_token")),
         "updated_at": acct.get("updated_at") or "",
+        "org_uuid": account_org(acct),
         "local": None if local is None else {
             "email": local["email"],
             "has_session_key": bool(local.get("session_key")),
@@ -210,8 +218,13 @@ def register_sub2api_routes(app: FastAPI, state, *, require_auth) -> None:
                 "accounts": out}
 
     @app.post("/api/sub2api/accounts/{account_id}/reauth")
-    async def sub2api_reauth(account_id: int, _=Depends(require_auth)):
-        """用对应本地账号的 sessionKey 重新授权，并把新令牌写回该 sub2api 账号。"""
+    async def sub2api_reauth(account_id: int, request: Request, _=Depends(require_auth)):
+        """用对应本地账号的 sessionKey 重新授权，并把新令牌写回该 sub2api 账号。
+
+        body 可选 {"org_uuid": "..."} 指定组织（工作空间）；不指定时沿用该 sub2api 账号
+        原来的组织，再退回本地上次授权的组织。
+        """
+        org_uuid = await oauth_acquire.read_org_uuid(request)
         c = client()
         try:
             try:
@@ -232,6 +245,7 @@ def register_sub2api_routes(app: FastAPI, state, *, require_auth) -> None:
                 row = await asyncio.to_thread(
                     oauth_acquire.acquire, state.conn, row["email"],
                     now=state.now_fn(), expect_email=email,
+                    org_uuid=org_uuid, preferred_org=account_org(acct),
                 )
             except OAuthError as exc:
                 log(f"sub2api 重新授权失败：#{account_id} {email}：{exc}")

@@ -426,3 +426,141 @@ def test_runner_auto_oauth_failure_keeps_success(tmp_path):
     assert db.get_run(conn, rid)["status"] == "success"
     log_txt = (tmp_path / "runs" / str(rid) / "log.txt").read_text(encoding="utf-8")
     assert "OAuth 授权失败" in log_txt
+
+
+# ---- 选择组织（工作空间） ----
+
+SEAT = "org-seat"
+ORGS = [{"uuid": TEAM, "name": "Northeastern University", "raven_type": "team",
+         "capabilities": ["chat", "raven"]},
+        {"uuid": SEAT, "name": "Premium Seat - Northeastern University", "raven_type": "team",
+         "capabilities": ["chat", "raven"], "rate_limit_tier": "tier", "billing_type": "b",
+         "secret_field": "x"}]
+
+
+def _authorized_org(fake):
+    url = [str(r.url) for r in fake.requests if str(r.url).endswith("/authorize")][-1]
+    return url.split("/v1/oauth/")[1].split("/")[0]
+
+
+def test_authorize_explicit_org_and_name():
+    fake = FakeClaude(orgs=ORGS, token_body={**TOKEN_BODY, "organization": {"uuid": SEAT}})
+    tokens = oauth.authorize_with_session_key(SK, org_uuid=SEAT, client_factory=fake.factory)
+    assert _authorized_org(fake) == SEAT
+    assert tokens.org_uuid == SEAT
+    assert tokens.org_name == "Premium Seat - Northeastern University"
+
+
+def test_authorize_explicit_org_must_exist():
+    fake = FakeClaude(orgs=ORGS)
+    with pytest.raises(oauth.OAuthError, match="不在该账号的组织列表"):
+        oauth.authorize_with_session_key(SK, org_uuid="org-gone", client_factory=fake.factory)
+    assert len(fake.requests) == 1  # 没有发起授权
+
+
+def test_authorize_preferred_org_falls_back():
+    fake = FakeClaude(orgs=ORGS)
+    oauth.authorize_with_session_key(SK, preferred_org=SEAT, client_factory=fake.factory)
+    assert _authorized_org(fake) == SEAT
+    fake = FakeClaude(orgs=[{"uuid": ORG}, {"uuid": TEAM, "raven_type": "team"}])
+    oauth.authorize_with_session_key(SK, preferred_org="org-gone", client_factory=fake.factory)
+    assert _authorized_org(fake) == TEAM
+
+
+def test_list_organizations_summary():
+    fake = FakeClaude(orgs=ORGS)
+    out = oauth.list_organizations(SK, "http://p:1", client_factory=fake.factory)
+    assert out["default"] == TEAM
+    assert [o["uuid"] for o in out["organizations"]] == [TEAM, SEAT]
+    assert out["organizations"][1] == {
+        "uuid": SEAT, "name": "Premium Seat - Northeastern University", "raven_type": "team",
+        "capabilities": ["chat", "raven"], "rate_limit_tier": "tier", "billing_type": "b"}
+    assert fake.proxy == "http://p:1"
+    assert oauth.list_organizations(SK, preferred=SEAT,
+                                    client_factory=FakeClaude(orgs=ORGS).factory)["default"] == SEAT
+    with pytest.raises(oauth.OAuthError) as ei:
+        oauth.list_organizations(SK, client_factory=FakeClaude(org_status=401).factory)
+    assert ei.value.kind == "dead"
+
+
+def test_acquire_org_selection_and_preference(tmp_path):
+    conn = db.init_db(tmp_path / "t.db")
+    db.upsert_account(conn, "a@x.com", "x.com", "", "", 1, "success", session_key=SK)
+    calls = []
+
+    def authorize(sk, proxy, **kw):
+        calls.append(kw)
+        return _tokens(org_uuid=kw.get("org_uuid") or kw.get("preferred_org") or TEAM,
+                       org_name="Seat")
+
+    row = oauth_acquire.acquire(conn, "a@x.com", now="T1", authorize=authorize, org_uuid=SEAT)
+    assert calls[-1] == {"org_uuid": SEAT}
+    assert row["org_uuid"] == SEAT and row["org_name"] == "Seat"
+    # 不指定时沿用上次授权的组织
+    oauth_acquire.acquire(conn, "a@x.com", now="T2", authorize=authorize)
+    assert calls[-1] == {"preferred_org": SEAT}
+    # 显式偏好优先于上次的组织
+    oauth_acquire.acquire(conn, "a@x.com", now="T3", authorize=authorize, preferred_org=TEAM)
+    assert calls[-1] == {"preferred_org": TEAM}
+
+
+def test_panel_list_orgs_and_oauth_with_org(tmp_path):
+    app, c = _panel(tmp_path)
+    fake = FakeClaude(orgs=ORGS, token_body={**TOKEN_BODY, "organization": {"uuid": SEAT}})
+    with mock.patch.object(oauth, "_default_client", fake.factory):
+        r = c.get("/api/accounts/a@x.com/oauth/organizations")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["default"] == TEAM and body["current"] == ""
+        assert [o["name"] for o in body["organizations"]] == [
+            "Northeastern University", "Premium Seat - Northeastern University"]
+        assert SK not in r.text
+        r = c.get(f"/api/accounts/a@x.com/oauth/organizations?preferred={SEAT}")
+        assert r.json()["default"] == SEAT
+
+        r = c.post("/api/accounts/a@x.com/oauth", json={"org_uuid": SEAT})
+        assert r.status_code == 200, r.text
+        assert r.json()["org_uuid"] == SEAT
+        assert r.json()["org_name"] == "Premium Seat - Northeastern University"
+        assert _authorized_org(fake) == SEAT
+        assert fake.proxy == "socks5://u:p@h:1080"
+
+        # 再次列出时 current / default 都是上次授权的组织
+        body = c.get("/api/accounts/a@x.com/oauth/organizations").json()
+        assert body["current"] == SEAT and body["default"] == SEAT
+
+        r = c.post("/api/accounts/a@x.com/oauth", json={"org_uuid": "org-gone"})
+        assert r.status_code == 422 and "组织列表" in r.json()["detail"]
+
+    assert c.post("/api/accounts/a@x.com/oauth", json={"org_uuid": 1}).status_code == 400
+    assert c.post("/api/accounts/a@x.com/oauth", content=b"{bad").status_code == 400
+    assert c.get("/api/accounts/nobody@x.com/oauth/organizations").status_code == 404
+    assert c.get("/api/accounts/nosk@x.com/oauth/organizations").status_code == 400
+    with mock.patch.object(oauth, "_default_client", FakeClaude(org_status=401).factory):
+        r = c.get("/api/accounts/a@x.com/oauth/organizations")
+    assert r.status_code == 422
+    assert db.get_account(app.state.cr.conn, "a@x.com")["check_status"] == "dead"
+    assert TestClient(app).get("/api/accounts/a@x.com/oauth/organizations").status_code == 401
+
+
+def test_open_api_orgs_and_oauth_with_org(tmp_path):
+    app = _app(tmp_path)
+    c = TestClient(app)
+    fake = FakeClaude(orgs=ORGS)
+    with mock.patch.object(oauth, "_default_client", fake.factory):
+        r = c.post("/api/v1/accounts/organizations", json={"email": "A@x.com"}, headers=H)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["email"] == "a@x.com" and body["default"] == TEAM
+        assert "secret_field" not in r.text
+        r = c.post("/api/v1/accounts/oauth?fields=email,org_uuid,org_name",
+                   json={"email": "a@x.com", "org_uuid": SEAT}, headers=H)
+        assert r.status_code == 200, r.text
+        assert _authorized_org(fake) == SEAT
+    assert r.json()["account"]["org_name"] == "Premium Seat - Northeastern University"
+    assert c.post("/api/v1/accounts/organizations", json={"email": "a@x.com"}).status_code == 401
+    assert c.post("/api/v1/accounts/organizations", json={}, headers=H).status_code == 400
+    assert c.post("/api/v1/accounts/organizations", json={"email": "nosk@x.com"},
+                  headers=H).status_code == 400
+    assert c.post("/api/v1/accounts/oauth", json={"email": "a@x.com", "org_uuid": ["x"]},
+                  headers=H).status_code == 400

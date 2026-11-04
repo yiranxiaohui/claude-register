@@ -39,6 +39,7 @@ FIELDS: tuple[ExportField, ...] = (
     ExportField("oauth_expires_at", "tokenExpiresAt", "令牌过期时间"),
     ExportField("oauth_scope", "scope", "OAuth scope"),
     ExportField("org_uuid", "orgUuid", "组织 UUID"),
+    ExportField("org_name", "orgName", "组织（工作空间）名称"),
     ExportField("account_uuid", "accountUuid", "Claude 账号 UUID"),
     ExportField("oauth_at", "oauthAt", "授权时间"),
 )

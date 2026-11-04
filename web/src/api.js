@@ -119,16 +119,28 @@ export const api = {
       method: "POST",
     }).then(j),
 
-  accountOAuth: (email) =>
+  accountOAuthOrgs: (email, preferred) =>
+    fetch(
+      `/api/accounts/${encodeURIComponent(email)}/oauth/organizations${
+        preferred ? `?${new URLSearchParams({ preferred })}` : ""
+      }`,
+    ).then(j),
+
+  // orgUuid 为空时由后端按「上次授权的组织 → team → 第一个」选择
+  accountOAuth: (email, orgUuid) =>
     fetch(`/api/accounts/${encodeURIComponent(email)}/oauth`, {
       method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(orgUuid ? { org_uuid: orgUuid } : {}),
     }).then(j),
 
   sub2apiAccounts: () => fetch("/api/sub2api/accounts").then(j),
 
-  sub2apiReauth: (id) =>
+  sub2apiReauth: (id, orgUuid) =>
     fetch(`/api/sub2api/accounts/${encodeURIComponent(id)}/reauth`, {
       method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(orgUuid ? { org_uuid: orgUuid } : {}),
     }).then(j),
 
   xuiTest: (node) =>
