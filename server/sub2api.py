@@ -13,13 +13,14 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 
 from claude_register.console import log
 from claude_register.oauth import OAuthError
-from server import db, oauth_acquire
+from server import db, oauth_acquire, oauth_import
 
 PLATFORM = "anthropic"
 ACCOUNT_TYPE = "oauth"
@@ -65,7 +66,7 @@ class Sub2APIClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def _request(self, method: str, path: str, **kw):
+    def _request(self, method: str, path: str, *, safe_errors=False, **kw):
         try:
             resp = self._client.request(method, path, **kw)
         except httpx.HTTPError as exc:
@@ -77,6 +78,10 @@ class Sub2APIClient:
         if resp.status_code == 401:
             raise Sub2APIError("sub2api 管理员 API Key 无效（HTTP 401）")
         if not 200 <= resp.status_code < 300:
+            if safe_errors:
+                if resp.status_code == 403:
+                    raise Sub2APIError("sub2api 拒绝导入：请使用有数据导入权限的管理员 API Key（HTTP 403）")
+                raise Sub2APIError(f"sub2api 导入失败（HTTP {resp.status_code}），请在 sub2api 核对结果后再操作")
             msg = payload.get("message") if isinstance(payload, dict) else None
             text = " ".join(str(msg or resp.text or "").split())[:_DETAIL_MAX]
             raise Sub2APIError(f"sub2api 返回 HTTP {resp.status_code}：{text}".rstrip("："))
@@ -113,6 +118,29 @@ class Sub2APIClient:
             json=apply_payload(row),
         )
         return data if isinstance(data, dict) else {}
+
+    def import_oauth(self, payload: dict, *, bind_default_group: bool) -> dict:
+        data = self._request(
+            "POST", "/accounts/data", safe_errors=True,
+            timeout=120.0,
+            headers={"Idempotency-Key": str(uuid4())},
+            json={"data": payload, "skip_default_group_bind": not bind_default_group},
+        )
+        # 上游可能部分成功；仅返回统计及失败的账号名，不透传可能携带凭据的错误正文。
+        total = len(payload["accounts"])
+        if not isinstance(data, dict) or any(
+            type(data.get(k)) is not int or data[k] < 0
+            for k in ("account_created", "account_failed")
+        ) or data["account_created"] + data["account_failed"] != total:
+            raise Sub2APIError("sub2api 导入结果格式不正确，请在 sub2api 核对结果后再操作")
+        names = {a["name"] for a in payload["accounts"]}
+        errors = data.get("errors")
+        failed_names = [e["name"] for e in errors
+                        if isinstance(e, dict) and e.get("kind") == "account"
+                        and isinstance(e.get("name"), str) and e["name"] in names] \
+            if isinstance(errors, list) else []
+        return {"created": data["account_created"], "failed": data["account_failed"],
+                "failed_names": failed_names}
 
 
 def apply_payload(row: dict) -> dict:
@@ -200,6 +228,44 @@ def register_sub2api_routes(app: FastAPI, state, *, require_auth) -> None:
 
     def local_by_email() -> dict[str, dict]:
         return {str(r["email"]).lower(): r for r in db.list_accounts(state.conn) if r.get("email")}
+
+    async def read_import(request: Request) -> dict:
+        content = bytearray()
+        async for chunk in request.stream():
+            if len(content) + len(chunk) > oauth_import.MAX_FILE_BYTES:
+                raise HTTPException(status_code=413, detail="JSON 文件不能超过 10 MB")
+            content.extend(chunk)
+        try:
+            filename = request.query_params.get("filename", "claude-oauth.json")
+            return oauth_import.parse_file(bytes(content), filename)
+        except (ValueError, RecursionError) as exc:
+            detail = "JSON 嵌套层级过深" if isinstance(exc, RecursionError) else str(exc)
+            raise HTTPException(status_code=400, detail=detail) from None
+
+    @app.post("/api/sub2api/import/preview")
+    async def sub2api_import_preview(request: Request, _=Depends(require_auth)):
+        payload = await read_import(request)
+        return {"accounts": [
+            {"name": a["name"], "concurrency": a["concurrency"], "priority": a["priority"],
+             "has_refresh_token": bool(a["credentials"].get("refresh_token"))}
+            for a in payload["accounts"]
+        ]}
+
+    @app.post("/api/sub2api/import")
+    async def sub2api_import(request: Request, _=Depends(require_auth)):
+        payload = await read_import(request)
+        bind_default_group = request.query_params.get("bind_default_group", "false")
+        if bind_default_group not in ("true", "false"):
+            raise HTTPException(status_code=400, detail="bind_default_group 必须是 true 或 false")
+
+        def work():
+            with client() as c:
+                return c.import_oauth(payload, bind_default_group=bind_default_group == "true")
+
+        try:
+            return await asyncio.to_thread(work)
+        except Sub2APIError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
 
     @app.get("/api/sub2api/accounts")
     async def sub2api_accounts(_=Depends(require_auth)):

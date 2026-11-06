@@ -136,6 +136,22 @@ export const api = {
 
   sub2apiAccounts: () => fetch("/api/sub2api/accounts").then(j),
 
+  sub2apiImportPreview: (file) =>
+    fetch(`/api/sub2api/import/preview?${new URLSearchParams({ filename: file.name })}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: file,
+    }).then(j),
+
+  sub2apiImport: (file, bindDefaultGroup) =>
+    fetch(`/api/sub2api/import?${new URLSearchParams({
+      filename: file.name, bind_default_group: String(bindDefaultGroup),
+    })}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: file,
+    }).then(j),
+
   sub2apiReauth: (id, orgUuid) =>
     fetch(`/api/sub2api/accounts/${encodeURIComponent(id)}/reauth`, {
       method: "POST",

@@ -127,7 +127,23 @@ sub2api 里的 Claude OAuth 账号 refresh_token 失效（如 `invalid_grant`）
 
 安全措施：新令牌所属的 Claude 邮箱必须与 sub2api 账号一致，否则不写库也不推送；本地无对应账号或
 无 sessionKey 的不能重新授权；sessionKey 已失效时返回失败并把本地检测结果记为失效。只能手动触发，
-不会自动推送，也不会在 sub2api 新建账号。注意 sub2api 地址若是 `http://`，管理员 Key 会明文经过网络。
+不会自动推送；重新授权不会在 sub2api 新建账号。注意 sub2api 地址若是 `http://`，管理员 Key 会明文经过网络。
+
+### 上传 OAuth JSON 并导入 Sub2API
+
+在「系统设置 → sub2api 对接」配置地址和有数据导入权限的管理员 API Key，然后打开
+「sub2api 同步 → 上传 OAuth JSON」，选择文件，核对账号预览后点击「确认导入 Sub2API」。
+可勾选绑定 Sub2API 默认分组；导入成功后列表自动切换到「全部」并刷新。
+
+- 支持含 `credentials.access_token` 的单账号、账号数组、`{"accounts": [...]}`，以及
+  Claude Code 的 `{"claudeAiOauth": {...}}`（`accessToken`、`refreshToken`、`expiresAt`、
+  `scopes` 等）。`expiresAt` 按毫秒转为秒，scopes 数组转为空格分隔的字符串。
+- 导入名称、OAuth 凭据、并发与优先级；名称优先使用 `name`、`email`、`credentials.email_address`，
+  再使用文件名（多账号加序号）。缺省并发为 `1`、优先级为 `50`。代理和其他账号配置可在 Sub2API 中设置。
+- 文件最大 10 MB、最多 1000 个账号，支持带 BOM 的 UTF-8。整个文件校验通过后才可导入。
+  文件仅在内存处理；预览和结果不返回令牌，账号直接新建到 Sub2API。
+- 使用 Sub2API 的 `POST /api/v1/admin/accounts/data`，展示成功/失败数量及失败账号名。
+  部分失败时仅重新提交失败账号；连接中断时先核对 Sub2API 列表，避免重复创建账号。
 
 ## 开放 API（触发注册、按需导出）
 

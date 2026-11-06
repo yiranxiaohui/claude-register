@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { KeyRound, RefreshCw } from "lucide-react";
+import { KeyRound, RefreshCw, Upload } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useOrgPicker } from "@/components/org-select-dialog";
+import { OAuthImportDialog } from "@/components/oauth-import-dialog";
 
 const STATUS = {
   active: ["正常", "bg-emerald-500/15 text-emerald-400"],
@@ -66,6 +67,7 @@ export default function Sub2API({ navigate }) {
   const [selected, setSelected] = useState(() => new Set());
   const [busy, setBusy] = useState(() => new Set());
   const [batch, setBatch] = useState(null); // {done,total}
+  const [importOpen, setImportOpen] = useState(false);
   const orgPicker = useOrgPicker();
 
   async function load() {
@@ -174,11 +176,16 @@ export default function Sub2API({ navigate }) {
   return (
     <>
       <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
           <CardTitle>sub2api 同步</CardTitle>
-          <Button variant="outline" size="sm" onClick={load} disabled={loading || !!batch}>
-            <RefreshCw className={cn(loading && "animate-spin")} /> 刷新
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => setImportOpen(true)} disabled={!!batch}>
+              <Upload /> 上传 OAuth JSON
+            </Button>
+            <Button variant="outline" size="sm" onClick={load} disabled={loading || !!batch}>
+              <RefreshCw className={cn(loading && "animate-spin")} /> 刷新
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-xs text-muted-foreground">
@@ -304,6 +311,8 @@ export default function Sub2API({ navigate }) {
           )}
         </CardContent>
       </Card>
+      <OAuthImportDialog open={importOpen} onOpenChange={setImportOpen}
+        onImported={() => { setFilter("all"); load(); }} />
       {orgPicker.dialog}
     </>
   );
