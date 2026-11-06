@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 import { toast } from "sonner";
 import { api, prepareOAuthUpload } from "../api.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { OAuthImportSettings, initialImportSettings, buildImportSettings } from "@/components/oauth-import-settings";
 import {
   AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -17,7 +18,29 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
   const [error, setError] = useState("");
   const [report, setReport] = useState(null);
   const [attempted, setAttempted] = useState(false);
-  const [bindDefaultGroup, setBindDefaultGroup] = useState(false);
+  const [form, setForm] = useState(initialImportSettings);
+  const [names, setNames] = useState([]);
+  const [options, setOptions] = useState(null);
+  const [optionsLoading, setOptionsLoading] = useState(false);
+  const [optionsError, setOptionsError] = useState("");
+  const optionsRequest = useRef(0);
+
+  async function loadOptions() {
+    const request = ++optionsRequest.current;
+    setOptionsLoading(true);
+    setOptionsError("");
+    setOptions(null);
+    try {
+      const result = await api.sub2apiImportOptions();
+      if (request === optionsRequest.current) setOptions(result);
+    } catch (e) {
+      if (request === optionsRequest.current && e?.status !== 401) {
+        setOptionsError(e.body?.detail || "代理和分组加载失败，请刷新重试");
+      }
+    } finally {
+      if (request === optionsRequest.current) setOptionsLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (!open) {
@@ -26,7 +49,15 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
       setError("");
       setReport(null);
       setAttempted(false);
+      setNames([]);
+      setForm(initialImportSettings());
+      setOptions(null);
+      setOptionsError("");
+      setOptionsLoading(false);
+      return;
     }
+    loadOptions();
+    return () => { optionsRequest.current += 1; };
   }, [open]);
 
   async function selectFile(event) {
@@ -36,12 +67,14 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
     setReport(null);
     setError("");
     setAttempted(false);
+    setNames([]);
     if (!selected.length) return;
     setBusy("preview");
     try {
       const prepared = await prepareOAuthUpload(selected);
       const result = await api.sub2apiImportPreview(prepared);
       setPreview(result);
+      setNames(result.accounts.map((account) => account.name));
       setUpload(prepared);
     } catch (e) {
       if (e?.status !== 401) setError(e.body?.detail || (e.status ? "文件校验失败，请重新选择文件" : e.message));
@@ -51,19 +84,35 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
   }
 
   async function doImport() {
-    if (!upload || !preview || busy || attempted) return;
+    if (!upload || !preview || busy || attempted || !options || optionsLoading) return;
+    let settings;
+    try {
+      settings = buildImportSettings(form, names);
+      if (settings.group_ids.some((id) => !options.groups.some((group) => group.id === id))
+        || (settings.proxy_id !== null && !options.proxies.some((proxy) => proxy.id === settings.proxy_id))) {
+        throw new Error("所选代理或分组已失效，请重新选择");
+      }
+    } catch (e) {
+      setError(e.message);
+      return;
+    }
     setBusy("import");
     setError("");
     setAttempted(true);
     try {
-      const result = await api.sub2apiImport(upload, bindDefaultGroup);
+      const result = await api.sub2apiImport(upload, settings);
       setReport(result);
       if (result.created) onImported?.();
       if (result.failed) toast.error(`导入完成：成功 ${result.created} 个，失败 ${result.failed} 个`);
       else toast.success(`已向 Sub2API 导入 ${result.created} 个账号`);
     } catch (e) {
       if (e?.status !== 401) {
-        setError(`${e.body?.detail || "导入请求未完成"}。请先在 Sub2API 核对账号列表，避免重复导入。`);
+        if (e.status === 400) {
+          setAttempted(false);
+          setError(e.body?.detail || "创建参数校验失败，请修改后重试");
+        } else {
+          setError(`${e.body?.detail || e.message || "导入请求未完成"}。请先在 Sub2API 核对账号列表，避免重复导入。`);
+        }
       }
     } finally {
       setBusy("");
@@ -89,6 +138,8 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
           </div>
           {busy === "preview" && <p role="status">正在校验文件…</p>}
           {error && <p role="alert" className="text-red-400">{error}</p>}
+          <OAuthImportSettings value={form} onChange={setForm} options={options} loading={optionsLoading}
+            error={optionsError} onReload={loadOptions} disabled={!!busy || attempted} />
           {preview && (
             <div className="space-y-2">
               <p>已选择 {preview.files?.length || 1} 个文件，已识别 {preview.accounts.length} 个 Claude OAuth 账号</p>
@@ -101,27 +152,23 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
                   <tbody>{preview.accounts.map((a, i) => (
                     <tr key={i} className="border-t">
                       <td className="max-w-60 p-2">
-                        <div className="truncate" title={a.name}>{a.name}</div>
+                        <Input aria-label={`第 ${i + 1} 个账号名称`} className="min-w-32 text-xs" maxLength={100}
+                          value={names[i] ?? a.name} disabled={!!busy || attempted}
+                          onChange={(e) => setNames((previous) => previous.map((name, index) => index === i ? e.target.value : name))} />
                         {a.source_file && <div className="truncate text-muted-foreground" title={a.source_file}>{a.source_file}</div>}
                       </td>
-                      <td className="p-2">{a.concurrency}</td><td className="p-2">{a.priority}</td>
+                      <td className="p-2">{form.concurrency || a.concurrency}</td><td className="p-2">{form.priority || a.priority}</td>
                       <td className="whitespace-nowrap p-2">{a.has_refresh_token ? "有" : "无"}</td>
                     </tr>
                   ))}</tbody>
                 </table>
               </div>
               <p className="text-xs text-muted-foreground">
-                导入名称、OAuth 凭据、并发和优先级；缺省并发为 1，优先级为 50。
+                可在表格中修改各账号名称，上方参数应用到所有账号。
                 此操作在 Sub2API 新建账号，重复上传可能产生重复账号。
               </p>
-              <label className="flex items-center gap-2">
-                <input type="checkbox" className="size-4 accent-primary"
-                  checked={bindDefaultGroup} disabled={!!busy || attempted}
-                  onChange={(e) => setBindDefaultGroup(e.target.checked)} />
-                绑定 Sub2API 默认分组
-              </label>
               <p className="text-xs text-muted-foreground">
-                分组和代理可在 Sub2API 中调整。缺少刷新令牌的账号到期后需重新授权。
+                缺少刷新令牌的账号到期后需重新授权。
               </p>
             </div>
           )}
@@ -141,7 +188,7 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
         </div>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={!!busy}>关闭</AlertDialogCancel>
-          <Button onClick={doImport} disabled={!preview || !!busy || attempted}>
+          <Button onClick={doImport} disabled={!preview || !!busy || attempted || !options || optionsLoading}>
             <Upload /> {busy === "import" ? "导入中…" : "确认导入 Sub2API"}
           </Button>
         </AlertDialogFooter>

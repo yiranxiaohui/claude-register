@@ -28,7 +28,6 @@ export async function prepareOAuthUpload(files) {
   const limit = 10 * 1024 * 1024;
   const tooLarge = "上传内容不能超过 10 MB，请分批选择文件";
   if (files.reduce((sum, file) => sum + file.size, 0) > limit) throw new Error(tooLarge);
-  if (files.length === 1) return { body: files[0], filename: files[0].name };
   const entries = await Promise.all(files.map(async (file) => {
     try {
       const content = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
@@ -44,12 +43,18 @@ export async function prepareOAuthUpload(files) {
   return { body };
 }
 
-function uploadOAuth(path, upload, params = {}) {
+async function uploadOAuth(path, upload, params = {}, settings) {
   if (upload.filename) params.filename = upload.filename;
+  let body = upload.body;
+  if (settings !== undefined) {
+    const batch = JSON.parse(await body.text());
+    body = new Blob([JSON.stringify({ ...batch, settings })], { type: body.type });
+    if (body.size > 10 * 1024 * 1024) throw new Error("上传内容不能超过 10 MB，请分批选择文件");
+  }
   return fetch(`${path}?${new URLSearchParams(params)}`, {
     method: "POST",
     headers: { "content-type": upload.filename ? "application/json" : upload.body.type },
-    body: upload.body,
+    body,
   }).then(j);
 }
 
@@ -169,8 +174,10 @@ export const api = {
 
   sub2apiImportPreview: (upload) => uploadOAuth("/api/sub2api/import/preview", upload),
 
-  sub2apiImport: (upload, bindDefaultGroup) =>
-    uploadOAuth("/api/sub2api/import", upload, { bind_default_group: String(bindDefaultGroup) }),
+  sub2apiImportOptions: () => fetch("/api/sub2api/import/options").then(j),
+
+  sub2apiImport: (upload, settings) =>
+    uploadOAuth("/api/sub2api/import", upload, {}, settings),
 
   sub2apiReauth: (id, orgUuid) =>
     fetch(`/api/sub2api/accounts/${encodeURIComponent(id)}/reauth`, {

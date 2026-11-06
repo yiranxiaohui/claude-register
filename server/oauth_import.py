@@ -43,7 +43,7 @@ def parse_file(content: bytes, filename: str = "claude-oauth.json") -> dict:
     return payload
 
 
-def parse_files(content: bytes) -> tuple[dict, list[dict]]:
+def parse_files(content: bytes) -> tuple[dict, list[dict], dict | None]:
     """多个原始 JSON 文件先全部校验，再合并为一次 Sub2API 导入。"""
     batch = _load_json(content)
     files = batch.get("files") if isinstance(batch, dict) else None
@@ -75,7 +75,10 @@ def parse_files(content: bytes) -> tuple[dict, list[dict]]:
             combined["accounts"].extend(payload["accounts"])
         if len(combined["accounts"]) > MAX_ACCOUNTS:
             raise ValueError(f"所有文件合计最多导入 {MAX_ACCOUNTS} 个账号，请分批上传")
-    return combined, summaries
+    settings = batch.get("settings")
+    if "settings" in batch and not isinstance(settings, dict):
+        raise ValueError("创建参数必须是对象")
+    return combined, summaries, settings
 
 
 def convert(source, default_name="claude-oauth") -> dict:

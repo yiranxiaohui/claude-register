@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from claude_register.console import log
 from claude_register.oauth import OAuthError
-from server import db, oauth_acquire, oauth_import
+from server import db, oauth_acquire, oauth_import, oauth_import_settings
 
 PLATFORM = "anthropic"
 ACCOUNT_TYPE = "oauth"
@@ -142,6 +142,47 @@ class Sub2APIClient:
         return {"created": data["account_created"], "failed": data["account_failed"],
                 "failed_names": failed_names}
 
+    def import_options(self) -> dict:
+        groups = self._request("GET", "/groups/all", params={"platform": PLATFORM}, safe_errors=True)
+        proxies = self._request("GET", "/proxies/all", safe_errors=True)
+        if not isinstance(groups, list) or not isinstance(proxies, list):
+            raise Sub2APIError("sub2api 分组或代理列表格式不正确")
+
+        def active_options(items, *, groups=False):
+            return [{"id": item["id"], "name": item["name"]} for item in items
+                    if isinstance(item, dict) and type(item.get("id")) is int
+                    and item["id"] > 0 and isinstance(item.get("name"), str)
+                    and item.get("status") == "active"
+                    and (not groups or item.get("platform") == PLATFORM)]
+
+        return {"groups": active_options(groups, groups=True), "proxies": active_options(proxies)}
+
+    def create_import_accounts(self, payload: dict) -> dict:
+        options = self.import_options()
+        groups = {g["id"] for g in options["groups"]}
+        proxies = {p["id"] for p in options["proxies"]}
+        for account in payload["accounts"]:
+            if set(account["group_ids"]) - groups:
+                raise ValueError("所选分组已停用或不属于 Anthropic，请刷新分组后重选")
+            if account["proxy_id"] is not None and account["proxy_id"] not in proxies:
+                raise ValueError("所选代理已停用或不存在，请刷新代理后重选")
+        data = self._request(
+            "POST", "/accounts/batch", safe_errors=True, timeout=120.0,
+            headers={"Idempotency-Key": str(uuid4())}, json={"accounts": payload["accounts"]},
+        )
+        total = len(payload["accounts"])
+        if not isinstance(data, dict) or any(
+            type(data.get(k)) is not int or data[k] < 0 for k in ("success", "failed")
+        ) or data["success"] + data["failed"] != total:
+            raise Sub2APIError("sub2api 创建结果格式不正确，请在 sub2api 核对结果后再操作")
+        names = {a["name"] for a in payload["accounts"]}
+        results = data.get("results")
+        failed_names = [item["name"] for item in results
+                        if isinstance(item, dict) and item.get("success") is False
+                        and isinstance(item.get("name"), str) and item["name"] in names] \
+            if isinstance(results, list) else []
+        return {"created": data["success"], "failed": data["failed"], "failed_names": failed_names}
+
 
 def apply_payload(row: dict) -> dict:
     """本地账号行（已有新令牌）→ apply-oauth-credentials 请求体。与 sub2api 刷新令牌时
@@ -229,7 +270,7 @@ def register_sub2api_routes(app: FastAPI, state, *, require_auth) -> None:
     def local_by_email() -> dict[str, dict]:
         return {str(r["email"]).lower(): r for r in db.list_accounts(state.conn) if r.get("email")}
 
-    async def read_import(request: Request) -> tuple[dict, list[dict]]:
+    async def read_import(request: Request) -> tuple[dict, list[dict], dict | None]:
         content = bytearray()
         async for chunk in request.stream():
             if len(content) + len(chunk) > oauth_import.MAX_FILE_BYTES:
@@ -237,16 +278,29 @@ def register_sub2api_routes(app: FastAPI, state, *, require_auth) -> None:
             content.extend(chunk)
         try:
             if request.headers.get("content-type", "").split(";")[0].strip().lower() == oauth_import.BATCH_CONTENT_TYPE:
-                return oauth_import.parse_files(bytes(content))
+                payload, files, settings = oauth_import.parse_files(bytes(content))
+                if settings is not None:
+                    payload = oauth_import_settings.apply_settings(payload, settings)
+                return payload, files, settings
             filename = request.query_params.get("filename", "claude-oauth.json")
-            return oauth_import.parse_file(bytes(content), filename), []
+            return oauth_import.parse_file(bytes(content), filename), [], None
         except (ValueError, RecursionError) as exc:
             detail = "JSON 嵌套层级过深" if isinstance(exc, RecursionError) else str(exc)
             raise HTTPException(status_code=400, detail=detail) from None
 
+    @app.get("/api/sub2api/import/options")
+    async def sub2api_import_options(_=Depends(require_auth)):
+        def work():
+            with client() as c:
+                return c.import_options()
+        try:
+            return await asyncio.to_thread(work)
+        except Sub2APIError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
     @app.post("/api/sub2api/import/preview")
     async def sub2api_import_preview(request: Request, _=Depends(require_auth)):
-        payload, files = await read_import(request)
+        payload, files, _settings = await read_import(request)
         accounts = [
             {"name": a["name"], "concurrency": a["concurrency"], "priority": a["priority"],
              "has_refresh_token": bool(a["credentials"].get("refresh_token"))}
@@ -263,17 +317,21 @@ def register_sub2api_routes(app: FastAPI, state, *, require_auth) -> None:
 
     @app.post("/api/sub2api/import")
     async def sub2api_import(request: Request, _=Depends(require_auth)):
-        payload, _files = await read_import(request)
+        payload, _files, settings = await read_import(request)
         bind_default_group = request.query_params.get("bind_default_group", "false")
         if bind_default_group not in ("true", "false"):
             raise HTTPException(status_code=400, detail="bind_default_group 必须是 true 或 false")
 
         def work():
             with client() as c:
+                if settings is not None:
+                    return c.create_import_accounts(payload)
                 return c.import_oauth(payload, bind_default_group=bind_default_group == "true")
 
         try:
             return await asyncio.to_thread(work)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         except Sub2APIError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
 
