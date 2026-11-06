@@ -8,6 +8,8 @@ import os
 import socket
 import time
 
+from playwright.sync_api import Error as PlaywrightError
+
 from claude_register.anymail import AnyMailClient
 from claude_register.browser import (
     BROWSER_INSTALL_HINT,
@@ -39,16 +41,22 @@ DEFAULT_TAKEOVER_MAX_UPSTREAM = 16
 
 
 # 接管页导航只等到 commit（收到首个响应），不等 DOMContentLoaded。
-# 已登录的 claude.ai 首页要从 assets-proxy.anthropic.com 并发拉几十个 JS 模块，
-# 经部分机场代理时 HTTP/2 多路复用会卡住，DOMContentLoaded 迟迟不来，
-# 60s 超时后整个接管会话被拆掉。接管本来就是给人看的：页面在 Xpra 画面里
-# 继续加载即可，拿到首个响应就说明代理与 claude.ai 都可达。
+# 页面访问是尽力而为，不作为启动接管的验证条件：即使首个响应超时或
+# 代理断开，也保留浏览器和 Xpra，让用户在接管画面里手动刷新、继续操作。
 TAKEOVER_NAV_WAIT_UNTIL = "commit"
 TAKEOVER_NAV_TIMEOUT_MS = 45_000
 
 
-def _open_takeover_page(page, url: str) -> None:
-    page.goto(url, wait_until=TAKEOVER_NAV_WAIT_UNTIL, timeout=TAKEOVER_NAV_TIMEOUT_MS)
+def _open_takeover_page(page, url: str) -> bool:
+    try:
+        page.goto(url, wait_until=TAKEOVER_NAV_WAIT_UNTIL, timeout=TAKEOVER_NAV_TIMEOUT_MS)
+    except PlaywrightError as exc:
+        browser = page.context.browser
+        if page.is_closed() or (browser is not None and not browser.is_connected()):
+            raise
+        log(f"打开 {url} 超时或失败（{exc}），浏览器已保留，可在接管画面中手动刷新。")
+        return False
+    return True
 
 
 def takeover_max_upstream() -> int:
@@ -215,10 +223,10 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
         context = new_context(browser)
         if not session_key:
             page = context.new_page()
-            _open_takeover_page(page, LOGIN_URL)
-            log("手动登录浏览器已打开 claude.ai 登录页（页面在接管画面中继续加载）。")
-            if login_email:
-                _prefill_login_email(page, login_email)
+            if _open_takeover_page(page, LOGIN_URL):
+                log("手动登录浏览器已打开 claude.ai 登录页（页面在接管画面中继续加载）。")
+                if login_email:
+                    _prefill_login_email(page, login_email)
             return _BrowserHandle(session, relay, page)
         context.add_cookies([{
             "name": "sessionKey",
@@ -229,8 +237,8 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
             "httpOnly": True,
         }])
         page = context.new_page()
-        _open_takeover_page(page, "https://claude.ai")
-        log("接管浏览器已注入 sessionKey 并打开 claude.ai（页面在接管画面中继续加载）。")
+        if _open_takeover_page(page, "https://claude.ai"):
+            log("接管浏览器已注入 sessionKey 并打开 claude.ai（页面在接管画面中继续加载）。")
     except Exception as exc:
         session.close()
         if relay is not None:
