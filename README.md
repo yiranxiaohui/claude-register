@@ -132,7 +132,7 @@ sub2api 里的 Claude OAuth 账号 refresh_token 失效（如 `invalid_grant`）
 ### 上传 OAuth JSON 并导入 Sub2API
 
 在「系统设置 → sub2api 对接」配置地址和有数据导入权限的管理员 API Key，然后打开
-「sub2api 同步 → 上传 OAuth JSON」，选择文件，核对账号预览后点击「确认导入 Sub2API」。
+「sub2api 同步 → 上传 OAuth JSON」，可同时选择多个文件，核对账号及来源文件预览后点击「确认导入 Sub2API」。
 可勾选绑定 Sub2API 默认分组；导入成功后列表自动切换到「全部」并刷新。
 
 - 支持含 `credentials.access_token` 的单账号、账号数组、`{"accounts": [...]}`，以及
@@ -140,7 +140,8 @@ sub2api 里的 Claude OAuth 账号 refresh_token 失效（如 `invalid_grant`）
   `scopes` 等）。`expiresAt` 按毫秒转为秒，scopes 数组转为空格分隔的字符串。
 - 导入名称、OAuth 凭据、并发与优先级；名称优先使用 `name`、`email`、`credentials.email_address`，
   再使用文件名（多账号加序号）。缺省并发为 `1`、优先级为 `50`。代理和其他账号配置可在 Sub2API 中设置。
-- 文件最大 10 MB、最多 1000 个账号，支持带 BOM 的 UTF-8。整个文件校验通过后才可导入。
+- 每批最多 1000 个文件、合计最多 1000 个账号，上传总大小不超过 10 MB，支持带 BOM 的 UTF-8。
+  多个文件会合并为一次导入，各自保留文件名作为缺省账号名；全部文件校验通过后才可导入，格式错误会指出来源文件。
   文件仅在内存处理；预览和结果不返回令牌，账号直接新建到 Sub2API。
 - 使用 Sub2API 的 `POST /api/v1/admin/accounts/data`，展示成功/失败数量及失败账号名。
   部分失败时仅重新提交失败账号；连接中断时先核对 Sub2API 列表，避免重复创建账号。

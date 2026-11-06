@@ -181,3 +181,76 @@ def test_invalid_result_and_missing_config(env, monkeypatch):
     assert r.status_code == 502 and "核对结果" in r.json()["detail"]
     save_config(app.state.cr.config_path, {"sub2api_base_url": ""})
     assert c.post("/api/sub2api/import", json=SOURCE).status_code == 400
+
+
+def _batch(*files):
+    return {"files": [{"filename": name, "content": content} for name, content in files]}
+
+
+def test_multiple_files_preview_and_single_import_request(env):
+    c, calls, app = env
+    headers = {"content-type": oauth_import.BATCH_CONTENT_TYPE}
+    source = _batch(("first.json", "\ufeff" + json.dumps(SOURCE)),
+                    ("second.json", json.dumps({"accounts": [SOURCE, SOURCE]})))
+    r = c.post("/api/sub2api/import/preview", json=source, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["files"] == [{"name": "first.json", "account_count": 1},
+                                  {"name": "second.json", "account_count": 2}]
+    accounts = r.json()["accounts"]
+    assert [a["name"] for a in accounts] == ["first", "second-1", "second-2"]
+    assert [a["source_file"] for a in accounts] == ["first.json", "second.json", "second.json"]
+    assert all(secret not in r.text for secret in (KEY, ACCESS, REFRESH))
+    assert not calls
+    r = c.post("/api/sub2api/import?bind_default_group=true", json=source, headers=headers)
+    assert r.status_code == 200
+    assert r.json() == {"created": 3, "failed": 0, "failed_names": []}
+    assert len(calls) == 1
+    body = json.loads(calls[0].content)
+    assert body["skip_default_group_bind"] is False
+    assert [a["name"] for a in body["data"]["accounts"]] == ["first", "second-1", "second-2"]
+    assert all(a["credentials"]["access_token"] == ACCESS for a in body["data"]["accounts"])
+    assert not db.list_accounts(app.state.cr.conn)
+
+
+@pytest.mark.parametrize("path", ["/api/sub2api/import/preview", "/api/sub2api/import"])
+def test_bad_second_file_blocks_entire_batch(env, path):
+    c, calls, _ = env
+    r = c.post(path, headers={"content-type": oauth_import.BATCH_CONTENT_TYPE}, json=_batch(
+        ("good.json", json.dumps(SOURCE)), ("bad.json", '{"private-secret-content":')))
+    assert r.status_code == 400
+    assert "bad.json" in r.json()["detail"]
+    assert "JSON 格式错误" in r.json()["detail"]
+    assert "private-secret-content" not in r.text
+    assert not calls
+
+
+@pytest.mark.parametrize("source, message", [
+    ({"files": []}, "至少一个"),
+    ({"files": [None]}, "文件名无效"),
+    ({"files": [{"filename": 7, "content": "{}"}]}, "文件名无效"),
+    (_batch(("", "{}")), "文件名无效"),
+    (_batch(("x.json", {})), "JSON 文本"),
+    (_batch(("x.json", '{"name":"\\ud800"}')), "access_token"),
+    (_batch(("\ud800.json", "{}")), "Unicode"),
+])
+def test_invalid_file_batches(env, source, message):
+    c, calls, _ = env
+    r = c.post("/api/sub2api/import", content=json.dumps(source),
+               headers={"content-type": oauth_import.BATCH_CONTENT_TYPE})
+    assert r.status_code == 400 and message in r.json()["detail"]
+    assert not calls
+
+
+def test_batch_limits_and_auth(env):
+    c, calls, _ = env
+    headers = {"content-type": oauth_import.BATCH_CONTENT_TYPE}
+    source = _batch(("a.json", json.dumps([SOURCE] * 501)),
+                    ("b.json", json.dumps([SOURCE] * 500)))
+    r = c.post("/api/sub2api/import", json=source, headers=headers)
+    assert r.status_code == 400 and "合计最多" in r.json()["detail"]
+    source = _batch(*[(f"{i}.json", json.dumps(SOURCE)) for i in range(1001)])
+    r = c.post("/api/sub2api/import", json=source, headers=headers)
+    assert r.status_code == 400 and "1000 个文件" in r.json()["detail"]
+    c.cookies.clear()
+    assert c.post("/api/sub2api/import", json=source, headers=headers).status_code == 401
+    assert not calls

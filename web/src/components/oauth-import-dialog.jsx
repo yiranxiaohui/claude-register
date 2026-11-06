@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Upload } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "../api.js";
+import { api, prepareOAuthUpload } from "../api.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 export function OAuthImportDialog({ open, onOpenChange, onImported }) {
-  const [file, setFile] = useState(null);
+  const [upload, setUpload] = useState(null);
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -21,7 +21,7 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
 
   useEffect(() => {
     if (!open) {
-      setFile(null);
+      setUpload(null);
       setPreview(null);
       setError("");
       setReport(null);
@@ -30,36 +30,33 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
   }, [open]);
 
   async function selectFile(event) {
-    const selected = event.target.files?.[0];
-    setFile(null);
+    const selected = Array.from(event.target.files || []);
+    setUpload(null);
     setPreview(null);
     setReport(null);
     setError("");
     setAttempted(false);
-    if (!selected) return;
-    if (selected.size > 10 * 1024 * 1024) {
-      setError("JSON 文件不能超过 10 MB");
-      return;
-    }
+    if (!selected.length) return;
     setBusy("preview");
     try {
-      const result = await api.sub2apiImportPreview(selected);
+      const prepared = await prepareOAuthUpload(selected);
+      const result = await api.sub2apiImportPreview(prepared);
       setPreview(result);
-      setFile(selected);
+      setUpload(prepared);
     } catch (e) {
-      if (e?.status !== 401) setError(e.body?.detail || "文件校验失败，请检查网络后重新选择文件");
+      if (e?.status !== 401) setError(e.body?.detail || (e.status ? "文件校验失败，请重新选择文件" : e.message));
     } finally {
       setBusy("");
     }
   }
 
   async function doImport() {
-    if (!file || !preview || busy || attempted) return;
+    if (!upload || !preview || busy || attempted) return;
     setBusy("import");
     setError("");
     setAttempted(true);
     try {
-      const result = await api.sub2apiImport(file, bindDefaultGroup);
+      const result = await api.sub2apiImport(upload, bindDefaultGroup);
       setReport(result);
       if (result.created) onImported?.();
       if (result.failed) toast.error(`导入完成：成功 ${result.created} 个，失败 ${result.failed} 个`);
@@ -79,22 +76,22 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
         <AlertDialogHeader>
           <AlertDialogTitle>上传 OAuth JSON</AlertDialogTitle>
           <AlertDialogDescription>
-            选择 Claude OAuth 文件，校验后转换并导入系统设置中配置的 Sub2API。
+            可同时选择多个 Claude OAuth JSON 文件，全部校验后合并导入系统设置中配置的 Sub2API。
             支持单账号、账号数组、accounts 数组，以及 Claude Code 的 claudeAiOauth 格式。
           </AlertDialogDescription>
         </AlertDialogHeader>
         <div className="space-y-4 text-sm">
           <div className="space-y-1.5">
-            <Label htmlFor="oauth-json-file">JSON 文件</Label>
-            <Input id="oauth-json-file" type="file" accept=".json,application/json"
+            <Label htmlFor="oauth-json-file">JSON 文件（可多选）</Label>
+            <Input id="oauth-json-file" type="file" accept=".json,application/json" multiple
               disabled={!!busy} onChange={selectFile} />
-            <p className="text-xs text-muted-foreground">最大 10 MB，每次最多 1000 个账号，支持 UTF-8 BOM。</p>
+            <p className="text-xs text-muted-foreground">每批最多 1000 个文件、合计 1000 个账号，上传总大小最多 10 MB，支持 UTF-8 BOM。</p>
           </div>
           {busy === "preview" && <p role="status">正在校验文件…</p>}
           {error && <p role="alert" className="text-red-400">{error}</p>}
           {preview && (
             <div className="space-y-2">
-              <p>已识别 {preview.accounts.length} 个 Claude OAuth 账号</p>
+              <p>已选择 {preview.files?.length || 1} 个文件，已识别 {preview.accounts.length} 个 Claude OAuth 账号</p>
               <div className="max-h-52 overflow-auto rounded-md border">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-muted">
@@ -103,7 +100,10 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
                   </thead>
                   <tbody>{preview.accounts.map((a, i) => (
                     <tr key={i} className="border-t">
-                      <td className="max-w-60 truncate p-2" title={a.name}>{a.name}</td>
+                      <td className="max-w-60 p-2">
+                        <div className="truncate" title={a.name}>{a.name}</div>
+                        {a.source_file && <div className="truncate text-muted-foreground" title={a.source_file}>{a.source_file}</div>}
+                      </td>
                       <td className="p-2">{a.concurrency}</td><td className="p-2">{a.priority}</td>
                       <td className="whitespace-nowrap p-2">{a.has_refresh_token ? "有" : "无"}</td>
                     </tr>

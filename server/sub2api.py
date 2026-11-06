@@ -229,31 +229,41 @@ def register_sub2api_routes(app: FastAPI, state, *, require_auth) -> None:
     def local_by_email() -> dict[str, dict]:
         return {str(r["email"]).lower(): r for r in db.list_accounts(state.conn) if r.get("email")}
 
-    async def read_import(request: Request) -> dict:
+    async def read_import(request: Request) -> tuple[dict, list[dict]]:
         content = bytearray()
         async for chunk in request.stream():
             if len(content) + len(chunk) > oauth_import.MAX_FILE_BYTES:
-                raise HTTPException(status_code=413, detail="JSON 文件不能超过 10 MB")
+                raise HTTPException(status_code=413, detail="上传内容不能超过 10 MB，请分批选择文件")
             content.extend(chunk)
         try:
+            if request.headers.get("content-type", "").split(";")[0].strip().lower() == oauth_import.BATCH_CONTENT_TYPE:
+                return oauth_import.parse_files(bytes(content))
             filename = request.query_params.get("filename", "claude-oauth.json")
-            return oauth_import.parse_file(bytes(content), filename)
+            return oauth_import.parse_file(bytes(content), filename), []
         except (ValueError, RecursionError) as exc:
             detail = "JSON 嵌套层级过深" if isinstance(exc, RecursionError) else str(exc)
             raise HTTPException(status_code=400, detail=detail) from None
 
     @app.post("/api/sub2api/import/preview")
     async def sub2api_import_preview(request: Request, _=Depends(require_auth)):
-        payload = await read_import(request)
-        return {"accounts": [
+        payload, files = await read_import(request)
+        accounts = [
             {"name": a["name"], "concurrency": a["concurrency"], "priority": a["priority"],
              "has_refresh_token": bool(a["credentials"].get("refresh_token"))}
             for a in payload["accounts"]
-        ]}
+        ]
+        if files:
+            offset = 0
+            for file in files:
+                for account in accounts[offset:offset + file["account_count"]]:
+                    account["source_file"] = file["name"]
+                offset += file["account_count"]
+            return {"accounts": accounts, "files": files}
+        return {"accounts": accounts}
 
     @app.post("/api/sub2api/import")
     async def sub2api_import(request: Request, _=Depends(require_auth)):
-        payload = await read_import(request)
+        payload, _files = await read_import(request)
         bind_default_group = request.query_params.get("bind_default_group", "false")
         if bind_default_group not in ("true", "false"):
             raise HTTPException(status_code=400, detail="bind_default_group 必须是 true 或 false")

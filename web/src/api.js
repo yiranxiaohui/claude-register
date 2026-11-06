@@ -22,6 +22,37 @@ const j = async (r) => {
   return r.json();
 };
 
+export async function prepareOAuthUpload(files) {
+  if (!files.length) throw new Error("请选择至少一个 JSON 文件");
+  if (files.length > 1000) throw new Error("每次最多上传 1000 个文件");
+  const limit = 10 * 1024 * 1024;
+  const tooLarge = "上传内容不能超过 10 MB，请分批选择文件";
+  if (files.reduce((sum, file) => sum + file.size, 0) > limit) throw new Error(tooLarge);
+  if (files.length === 1) return { body: files[0], filename: files[0].name };
+  const entries = await Promise.all(files.map(async (file) => {
+    try {
+      const content = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+      return { filename: file.name, content };
+    } catch {
+      throw new Error(`文件「${file.name}」读取失败，请使用 UTF-8 编码的 JSON 文件`);
+    }
+  }));
+  const body = new Blob([JSON.stringify({ files: entries })], {
+    type: "application/vnd.claude-register.oauth-files+json",
+  });
+  if (body.size > limit) throw new Error(tooLarge);
+  return { body };
+}
+
+function uploadOAuth(path, upload, params = {}) {
+  if (upload.filename) params.filename = upload.filename;
+  return fetch(`${path}?${new URLSearchParams(params)}`, {
+    method: "POST",
+    headers: { "content-type": upload.filename ? "application/json" : upload.body.type },
+    body: upload.body,
+  }).then(j);
+}
+
 export const api = {
   login: (password) =>
     fetch("/api/login", {
@@ -136,21 +167,10 @@ export const api = {
 
   sub2apiAccounts: () => fetch("/api/sub2api/accounts").then(j),
 
-  sub2apiImportPreview: (file) =>
-    fetch(`/api/sub2api/import/preview?${new URLSearchParams({ filename: file.name })}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: file,
-    }).then(j),
+  sub2apiImportPreview: (upload) => uploadOAuth("/api/sub2api/import/preview", upload),
 
-  sub2apiImport: (file, bindDefaultGroup) =>
-    fetch(`/api/sub2api/import?${new URLSearchParams({
-      filename: file.name, bind_default_group: String(bindDefaultGroup),
-    })}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: file,
-    }).then(j),
+  sub2apiImport: (upload, bindDefaultGroup) =>
+    uploadOAuth("/api/sub2api/import", upload, { bind_default_group: String(bindDefaultGroup) }),
 
   sub2apiReauth: (id, orgUuid) =>
     fetch(`/api/sub2api/accounts/${encodeURIComponent(id)}/reauth`, {
