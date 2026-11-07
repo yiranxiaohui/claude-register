@@ -86,6 +86,69 @@ def test_creation_parameters_reach_batch_api(env):
         }
 
 
+@pytest.mark.parametrize("settings, expected", [
+    ({"name_prefix": "batch-"}, ["batch-accounts-1", "batch-accounts-2"]),
+    ({"name_prefix": "  批次-  ", "names": [" First ", "Second"]}, ["批次-First", "批次-Second"]),
+    ({"name_prefix": ""}, ["accounts-1", "accounts-2"]),
+    ({"name_prefix": "   "}, ["accounts-1", "accounts-2"]),
+    ({"name_prefix": "前" * 99, "names": ["甲", "乙"]}, ["前" * 99 + "甲", "前" * 99 + "乙"]),
+])
+def test_name_prefix_matches_preview_and_created_names(env, settings, expected):
+    c, calls, _ = env
+    source = batch(settings)
+    r = c.post("/api/sub2api/import/preview", json=source, headers=HEADERS)
+    assert r.status_code == 200 and not calls
+    assert [a["name"] for a in r.json()["accounts"]] == expected
+    assert "private-" not in r.text
+    r = c.post("/api/sub2api/import", json=source, headers=HEADERS)
+    assert r.status_code == 200
+    accounts = json.loads(calls[-1].content)["accounts"]
+    assert [a["name"] for a in accounts] == expected
+    assert all(a["credentials"] == SOURCE["credentials"] for a in accounts)
+    assert all("name_prefix" not in a for a in accounts)
+
+
+def test_prefix_applies_across_files_and_preserves_source_names(env):
+    c, calls, _ = env
+    source = {"files": [
+        {"filename": "first.json", "content": json.dumps({**SOURCE, "name": "Original"})},
+        {"filename": "second.json", "content": json.dumps(SOURCE)},
+    ], "settings": {"name_prefix": "batch-"}}
+    r = c.post("/api/sub2api/import/preview", json=source, headers=HEADERS)
+    assert r.status_code == 200 and not calls
+    assert [(a["name"], a["source_file"]) for a in r.json()["accounts"]] == [
+        ("batch-Original", "first.json"), ("batch-second", "second.json"),
+    ]
+    r = c.post("/api/sub2api/import", json=source, headers=HEADERS)
+    assert r.status_code == 200
+    assert [a["name"] for a in json.loads(calls[-1].content)["accounts"]] == ["batch-Original", "batch-second"]
+
+
+def test_name_prefix_does_not_mutate_payload_or_accumulate():
+    original = oauth_import.convert({**SOURCE, "name": "Original"})
+    settings = {"name_prefix": "batch-"}
+    for _ in range(2):
+        result = oauth_import_settings.apply_settings(original, settings)
+        assert result["accounts"][0]["name"] == "batch-Original"
+    assert original["accounts"][0]["name"] == "Original"
+    assert original["accounts"][0]["credentials"] == SOURCE["credentials"]
+    assert settings == {"name_prefix": "batch-"}
+
+
+@pytest.mark.parametrize("path", ["/api/sub2api/import/preview", "/api/sub2api/import"])
+@pytest.mark.parametrize("settings", [
+    {"name_prefix": None}, {"name_prefix": 1}, {"name_prefix": True}, {"name_prefix": []},
+    {"name_prefix": {}}, {"name_prefix": "x" * 101}, {"name_prefix": "\ud800"},
+    {"name_prefix": "x" * 100}, {"name_prefix": "batch-", "names": ["Good", "x" * 95]},
+    {"name_prefix": "batch-", "names": ["Good", " "]},
+])
+def test_invalid_prefix_blocks_entire_batch(env, path, settings):
+    c, calls, _ = env
+    r = c.post(path, content=json.dumps(batch(settings)), headers=HEADERS)
+    assert r.status_code == 400 and not calls
+    assert "private-" not in r.text
+
+
 def test_file_values_and_model_modes_are_preserved():
     original = oauth_import.convert({**SOURCE, "concurrency": 8, "priority": 9})
     result = oauth_import_settings.apply_settings(original, {})["accounts"][0]
@@ -125,6 +188,18 @@ def test_stale_or_wrong_platform_options_block_creation(env, settings):
     r = c.post("/api/sub2api/import", json=batch(settings), headers=HEADERS)
     assert r.status_code == 400
     assert all(call.method == "GET" for call in calls)
+
+
+def test_partial_failure_returns_prefixed_name(env):
+    c, _, state = env
+    state.update(created=1, failed=1, results=[
+        {"success": False, "name": "batch-accounts-2", "error": "private-access"},
+        {"success": False, "name": "private-admin"},
+    ])
+    r = c.post("/api/sub2api/import", json=batch({"name_prefix": "batch-"}), headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json() == {"created": 1, "failed": 1, "failed_names": ["batch-accounts-2"]}
+    assert "private-" not in r.text
 
 
 def test_partial_failure_and_upstream_errors_are_sanitized(env):

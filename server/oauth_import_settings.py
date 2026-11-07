@@ -32,7 +32,7 @@ def _model(value, *, wildcard=False):
 def apply_settings(payload: dict, settings) -> dict:
     if not isinstance(settings, dict):
         raise ValueError("创建参数必须是对象")
-    allowed = {"names", "notes", "concurrency", "priority", "rate_multiplier", "proxy_id",
+    allowed = {"names", "name_prefix", "notes", "concurrency", "priority", "rate_multiplier", "proxy_id",
                "group_ids", "expires_at", "auto_pause_on_expired", "model_mode", "models", "model_mapping"}
     if set(settings) - allowed:
         raise ValueError("包含不支持的创建参数")
@@ -71,16 +71,19 @@ def apply_settings(payload: dict, settings) -> dict:
         if not isinstance(raw, dict) or not 1 <= len(raw) <= 200:
             raise ValueError("模型映射需要 1–200 条规则")
         mapping = {_model(k, wildcard=True): _model(v) for k, v in raw.items()}
+    name_prefix = _text(settings.get("name_prefix", ""), "账号名称前缀", empty=True)
     names = settings.get("names", [a["name"] for a in payload["accounts"]])
     if not isinstance(names, list) or len(names) != len(payload["accounts"]):
         raise ValueError("账号名称数量必须与预览账号数量一致")
     accounts = []
     for index, (account, name) in enumerate(zip(payload["accounts"], names), 1):
+        name = _text(name, f"第 {index} 个账号名称")
+        name = _text(name_prefix + name, f"第 {index} 个账号名称（含前缀）")
         credentials = dict(account["credentials"])
         if mode == "all":
             credentials.pop("model_mapping", None)
         elif mode in ("whitelist", "mapping"):
             credentials["model_mapping"] = dict(mapping)
-        accounts.append({**account, **common, "name": _text(name, f"第 {index} 个账号名称"),
+        accounts.append({**account, **common, "name": name,
                          "credentials": credentials})
     return {**payload, "accounts": accounts}

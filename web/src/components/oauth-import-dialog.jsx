@@ -5,7 +5,7 @@ import { api, prepareOAuthUpload } from "../api.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { OAuthImportSettings, initialImportSettings, buildImportSettings } from "@/components/oauth-import-settings";
+import { OAuthImportSettings, initialImportSettings, buildImportSettings, prefixedImportName } from "@/components/oauth-import-settings";
 import {
   AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -155,6 +155,11 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
                         <Input aria-label={`第 ${i + 1} 个账号名称`} className="min-w-32 text-xs" maxLength={100}
                           value={names[i] ?? a.name} disabled={!!busy || attempted}
                           onChange={(e) => setNames((previous) => previous.map((name, index) => index === i ? e.target.value : name))} />
+                        {form.namePrefix.trim() && (
+                          <div className="break-all text-muted-foreground">
+                            导入名称：{prefixedImportName(names[i] ?? a.name, form.namePrefix)}
+                          </div>
+                        )}
                         {a.source_file && <div className="truncate text-muted-foreground" title={a.source_file}>{a.source_file}</div>}
                       </td>
                       <td className="p-2">{form.concurrency || a.concurrency}</td><td className="p-2">{form.priority || a.priority}</td>
@@ -164,7 +169,7 @@ export function OAuthImportDialog({ open, onOpenChange, onImported }) {
                 </table>
               </div>
               <p className="text-xs text-muted-foreground">
-                可在表格中修改各账号名称，上方参数应用到所有账号。
+                可在表格中修改各账号名称（不含统一前缀），上方参数应用到所有账号。
                 此操作在 Sub2API 新建账号，重复上传可能产生重复账号。
               </p>
               <p className="text-xs text-muted-foreground">

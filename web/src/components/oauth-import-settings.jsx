@@ -3,15 +3,24 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export function initialImportSettings() {
-  return { concurrency: "", priority: "", rate: "1", notes: "", proxyId: "", groupIds: [],
+  return { namePrefix: "", concurrency: "", priority: "", rate: "1", notes: "", proxyId: "", groupIds: [],
     expiresAt: "", autoPause: true, modelMode: "keep", modelText: "" };
 }
 
+export function prefixedImportName(name, prefix = "") {
+  return prefix.trim() + name.trim();
+}
+
 export function buildImportSettings(form, names) {
-  if (names.some((name) => !name.trim() || name.trim().length > 100)) {
+  if (names.some((name) => !name.trim() || [...name.trim()].length > 100)) {
     throw new Error("每个账号名称须为 1–100 个字符");
   }
-  const settings = { names: names.map((name) => name.trim()), notes: form.notes,
+  const prefix = form.namePrefix ?? "";
+  if ([...prefix].length > 100) throw new Error("账号名称前缀最多 100 个字符");
+  if (names.some((name) => [...prefixedImportName(name, prefix)].length > 100)) {
+    throw new Error("添加前缀后的每个账号名称最多 100 个字符，请缩短前缀或账号名称");
+  }
+  const settings = { names: names.map((name) => name.trim()), name_prefix: prefix.trim(), notes: form.notes,
     proxy_id: form.proxyId ? Number(form.proxyId) : null, group_ids: form.groupIds,
     auto_pause_on_expired: form.autoPause, model_mode: form.modelMode };
   for (const [key, label, minimum] of [["concurrency", "并发数", 1], ["priority", "优先级", 0]]) {
@@ -55,6 +64,14 @@ export function OAuthImportSettings({ value, onChange, options, loading, error, 
   return (
     <fieldset disabled={disabled} className="min-w-0 space-y-3 rounded-md border p-3">
       <legend className="px-1 font-medium">账号创建参数（应用到本批全部账号）</legend>
+      <div className="space-y-1.5">
+        <Label htmlFor="oauth-name-prefix">账号名称前缀</Label>
+        <Input id="oauth-name-prefix" maxLength={100} value={value.namePrefix} placeholder="可选，例如 batch-"
+          onChange={(e) => set("namePrefix", e.target.value)} aria-describedby="oauth-name-prefix-help" />
+        <p id="oauth-name-prefix-help" className="text-xs text-muted-foreground">
+          留空不添加；去除首尾空白后直接拼接到每个账号名称前，分隔符请自行填写。最终名称最多 100 个字符。
+        </p>
+      </div>
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="space-y-1.5">
           <Label htmlFor="oauth-concurrency">并发数</Label>
