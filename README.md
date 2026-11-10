@@ -43,6 +43,7 @@ Compose 的 `v2ray` profile 可启动 Xray，给应用提供容器网络内的 S
    ```bash
    mkdir -p xray
    cp xray/config.example.json xray/config.json
+   chown 65532:65532 xray/config.json
    chmod 600 xray/config.json
    ```
 
