@@ -35,7 +35,9 @@ class XrayManager:
         supervisorctl: str | None = None,
     ):
         self.config_path = Path(config_path)
-        self.enabled_path = self.config_path.with_suffix(".enabled")
+        # Keep the enable marker beside config.json as xray/enabled; unlike
+        # with_suffix(), this preserves the filename expected by the entrypoint.
+        self.enabled_path = self.config_path.parent / "enabled"
         self.supervisor_config = supervisor_config or os.environ.get(
             "CLAUDE_REGISTER_SUPERVISOR_CONFIG",
             "/etc/supervisor/conf.d/claude-register.conf",

@@ -40,7 +40,7 @@ def test_xray_status_reports_running_without_secrets(tmp_path):
     config = tmp_path / "xray" / "config.json"
     config.parent.mkdir()
     config.write_text('{"password":"never-return-this"}')
-    config.with_suffix(".enabled").touch()
+    (config.parent / "enabled").touch()
     supervisor = FakeSupervisor("RUNNING")
     manager = XrayManager(config, binary="/bin/true", supervisorctl="supervisorctl")
     manager._run = lambda *args: supervisor(["supervisorctl", "-c", "conf", *args])
@@ -83,7 +83,7 @@ def test_configure_proxy_writes_private_xray_config(tmp_path):
     }
     assert saved["inbounds"][0]["listen"] == "127.0.0.1"
     assert config.stat().st_mode & 0o777 == 0o600
-    assert config.with_suffix(".enabled").exists() is False
+    assert (config.parent / "enabled").exists() is False
 
 
 @pytest.mark.parametrize("value", [
