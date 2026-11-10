@@ -26,6 +26,7 @@ from server.config_store import save_config, to_dict
 from server.deps import AppState, default_now
 from server.runner import RunnerBusy
 from server.takeover import TakeoverBusy, TakeoverError
+from server.xray import XrayError
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
@@ -103,11 +104,95 @@ def create_app(*, data_dir, config_path, now_fn=None) -> FastAPI:
     @app.put("/api/config")
     async def put_config(request: Request, _=Depends(require_auth_or_bootstrap)):
         body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+        # Xray 页面之外的设置保存可能携带旧表单值；不要让它把正在使用的
+        # loopback 代理悄悄改回旧地址，切换必须通过 Xray 控制区完成。
+        if (state.config().register_proxy == "socks5h://127.0.0.1:10808"
+                and state.xray.enabled_path.exists()):
+            body = {**body, "register_proxy": "socks5h://127.0.0.1:10808"}
         try:
             cfg = save_config(state.config_path, body)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return to_dict(cfg)
+
+    def xray_status_payload() -> dict:
+        result = state.xray.status()
+        result["active"] = state.config().register_proxy == "socks5h://127.0.0.1:10808"
+        return result
+
+    @app.get("/api/xray")
+    def xray_status(_=Depends(require_auth)):
+        return xray_status_payload()
+
+    @app.post("/api/xray/configure")
+    async def xray_configure(request: Request, _=Depends(require_auth)):
+        if state.runner.is_busy():
+            raise HTTPException(status_code=409, detail="注册任务运行中，暂不能修改 Xray")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        previous_xray = state.xray.snapshot_config()
+        previous_proxy = state.config().register_proxy
+        was_enabled = state.xray.enabled_path.exists()
+
+        def rollback_xray() -> None:
+            state.xray.restore_config(previous_xray)
+            if was_enabled and previous_xray is not None:
+                state.xray.action("restart")
+            else:
+                state.xray.action("stop")
+            save_config(state.config_path, {"register_proxy": previous_proxy})
+
+        try:
+            state.xray.configure_proxy(str(body.get("proxy", "") or ""))
+            state.xray.action("restart")
+            state.xray.test_egress()
+            save_config(state.config_path, {"register_proxy": "socks5h://127.0.0.1:10808"})
+        except XrayError as exc:
+            try:
+                rollback_xray()
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except Exception:
+            try:
+                rollback_xray()
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail="保存或启动 Xray 失败，已恢复原配置") from None
+        return xray_status_payload()
+
+    @app.post("/api/xray/test")
+    def xray_test(_=Depends(require_auth)):
+        try:
+            return state.xray.test_egress()
+        except XrayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+
+    @app.post("/api/xray/{action}")
+    def xray_action(action: str, _=Depends(require_auth)):
+        if action in {"stop", "restart"} and state.runner.is_busy():
+            raise HTTPException(status_code=409, detail="注册任务运行中，暂不能操作 Xray")
+        if action in {"start", "restart"} and state.runner.is_busy():
+            raise HTTPException(status_code=409, detail="注册任务运行中，暂不能启动或重启 Xray")
+        try:
+            status = state.xray.action(action)
+            if action == "stop" and status["configured"]:
+                save_config(state.config_path, {
+                    "register_proxy": state.xray.upstream_proxy_url(),
+                })
+            elif action == "start":
+                save_config(state.config_path, {
+                    "register_proxy": "socks5h://127.0.0.1:10808",
+                })
+            return xray_status_payload()
+        except XrayError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
     @app.post("/api/xui/test")
     async def xui_test(request: Request, _=Depends(require_auth)):

@@ -34,24 +34,11 @@ docker compose up -d
 
 `docker-compose.yml` 默认把 `./data`（sqlite + 运行记录）和 `./config.yaml` 挂进容器；镜像由 CI（`.github/workflows/build.yml`，跑在 self-hosted runner 上）构建推送到 `ghcr.io/yiranxiaohui/claude-register`，**部署机器只 `pull`，不在本地跑 `docker build`**。
 
-### 可选 Xray/V2Ray 兼容 SOCKS 出站
+### 嵌入式 Xray/V2Ray 兼容 SOCKS 出站
 
-Compose 的 `v2ray` profile 可启动 Xray，给应用提供容器网络内的 SOCKS5 入口，再由 Xray 转发到 SOCKS5 上游。默认不启用，不会改变现有代理行为。
+Xray 与面板一起运行在 Claude Register 容器中，由 Supervisor 单独管理。设置页的「Xray 出站」可查看状态、配置 SOCKS5 上游、启动/停止/重启并测试出口；凭据保存在 `data/xray/config.json`（容器内权限 `0600`），不会回显到页面。配置 Xray 上游后，注册代理会自动切换到 `socks5h://127.0.0.1:10808`。
 
-1. 在部署目录创建配置目录并复制模板：
-
-   ```bash
-   mkdir -p xray
-   cp xray/config.example.json xray/config.json
-   chown 65532:65532 xray/config.json
-   chmod 600 xray/config.json
-   ```
-
-2. 在 `xray/config.json` 中填写上游 SOCKS5 的主机、端口和认证。此文件已被 `.gitignore` 排除，不要提交它。
-3. 在面板「设置 → 注册参数」将注册代理设为 `socks5h://xray:10808` 并保存。
-4. 使用 `docker compose --profile v2ray up -d` 启动两个服务，再验证 `xray` 健康状态和注册任务日志。
-
-回退时先把面板注册代理恢复为原地址，保存后执行 `docker compose stop xray`；移除 profile 服务不影响 Claude Register 或其持久化数据。Xray 不会自动把 VLESS/VMess/Trojan 分享链接转换成配置；这类节点需要先写成 Xray outbound 配置，或使用 SOCKS5 上游。Xray 入站仅暴露给 Docker 内部网络，不发布到宿主机端口。
+Xray 暴露于容器 loopback，不发布宿主机端口。Xray 不会自动把 VLESS/VMess/Trojan 分享链接转换成配置；这些节点需通过 Xray 原生配置单独支持。
 
 面板里改的设置会写回 `config.yaml`，接口和日志里 AnyMail Key 等敏感字段做了脱敏。
 

@@ -8,7 +8,6 @@ __pycache__/
 .superpowers/
 data/
 config.yaml
-xray/config.json
 web/dist/
 web/node_modules/
 
