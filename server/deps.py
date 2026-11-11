@@ -7,9 +7,9 @@ from pathlib import Path
 
 from server import db
 from server.config_store import Config, load_config
+from server.legacy_xray import migrate_register_proxy
 from server.runner import Runner
 from server.takeover import TakeoverManager
-from server.xray import XrayManager
 
 
 def default_now() -> str:
@@ -21,6 +21,7 @@ class AppState:
         self.data_dir = Path(data_dir)
         self.config_path = Path(config_path)
         self.now_fn = now_fn
+        migrate_register_proxy(self.config_path, self.data_dir)
         self.conn = db.init_db(self.data_dir / "claude-register.db")
         db.mark_stale_running_as_failed(self.conn)  # 重启清理残留 running
         self.runner = Runner(self.conn, self.data_dir, now_fn)
@@ -32,7 +33,6 @@ class AppState:
             self.secret = secrets.token_hex(32)
             secret_path.write_text(self.secret, encoding="utf-8")
         self.takeover = TakeoverManager(now_fn=now_fn)
-        self.xray = XrayManager(self.data_dir / "xray" / "config.json")
 
     def config(self) -> Config:
         return load_config(self.config_path)

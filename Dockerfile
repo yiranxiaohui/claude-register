@@ -1,7 +1,3 @@
-ARG XRAY_IMAGE=ghcr.io/xtls/xray-core@sha256:ceabeac03a89d991d2a247361825c1d1d2e9c91cd5dc010f298c7dc0c2f325c9
-
-FROM ${XRAY_IMAGE} AS xray
-
 # 1) 前端
 FROM oven/bun:1 AS web
 WORKDIR /web
@@ -21,10 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     supervisor \
     ca-certificates && \
-    rm -rf /var/lib/apt/lists/* && \
-    groupadd --system --gid 65532 xray && \
-    useradd --system --uid 65532 --gid 65532 --no-create-home \
-      --shell /usr/sbin/nologin xray
+    rm -rf /var/lib/apt/lists/*
 # Xpra LTS：虚拟 X 桌面 + WebSocket/HTML5 客户端。固定 HTML5 5.6，避免较新
 # 16.x 客户端在慢网络下的重连回归，并保留双向 Clipboard API 同步。
 # 官方仓库签名 Key 指纹：B499 3B57 3231 48E3 7977 E5D8 7325 4CAD 1797 8FAF。
@@ -55,9 +48,7 @@ COPY server/ ./server/
 COPY serve.py main.py README.md ./
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
 COPY deploy/supervisord.conf /etc/supervisor/conf.d/claude-register.conf
-COPY --from=xray /usr/local/bin/xray /usr/local/bin/xray
-COPY deploy/xray-entrypoint.sh /usr/local/bin/claude-register-xray
-RUN chmod 0755 /usr/local/bin/xray /usr/local/bin/claude-register-xray && nginx -t
+RUN nginx -t
 RUN uv sync --frozen --no-dev
 COPY --from=web /web/dist ./web/dist
 ENV CLAUDE_REGISTER_INTERNAL_PORT=8791

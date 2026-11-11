@@ -6,7 +6,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { XrayPanel } from "@/components/xray-panel.jsx";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -246,13 +245,6 @@ export default function Settings({ onPasswordSet }) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  function syncConfig(updated) {
-    const picked = {};
-    for (const key of OWN_KEYS) picked[key] = updated[key];
-    picked.panel_password = form.panel_password;
-    setForm(picked);
-  }
-
   async function save(e) {
     e.preventDefault();
     setSaving(true);
@@ -283,7 +275,6 @@ export default function Settings({ onPasswordSet }) {
 
   return (
     <>
-      <XrayPanel onConfigChanged={syncConfig} />
       <form onSubmit={save}>
         {GROUPS.map((group) => (
           <Card className="mb-5" key={group.title}>

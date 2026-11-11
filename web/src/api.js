@@ -196,19 +196,6 @@ export const api = {
   xuiCleanup: () =>
     fetch("/api/xui/cleanup", { method: "POST" }).then(j),
 
-  xrayStatus: () => fetch("/api/xray").then(j),
-
-  xrayConfigure: (proxy) =>
-    fetch("/api/xray/configure", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ proxy }),
-    }).then(j),
-
-  xrayAction: (action) => fetch(`/api/xray/${action}`, { method: "POST" }).then(j),
-
-  xrayTest: () => fetch("/api/xray/test", { method: "POST" }).then(j),
-
   takeoverStart: (email) =>
     fetch("/api/takeover/start", {
       method: "POST",

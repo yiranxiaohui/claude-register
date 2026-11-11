@@ -46,10 +46,6 @@ def test_runtime_uses_supervisor_for_panel_and_nginx():
     assert "CLAUDE_REGISTER_INTERNAL_PORT=8791" in dockerfile
     assert "[program:panel]" in supervisor
     assert "[program:nginx]" in supervisor
-    assert "[program:xray]" in supervisor
-    assert "user=65532" in supervisor
-    assert "autostart=true" in supervisor
-    assert "[rpcinterface:supervisor]" in supervisor
 
 
 def test_runtime_installs_pinned_xpra_lts_and_html5_client():

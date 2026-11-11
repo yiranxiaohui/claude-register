@@ -34,13 +34,9 @@ docker compose up -d
 
 `docker-compose.yml` 默认把 `./data`（sqlite + 运行记录）和 `./config.yaml` 挂进容器；镜像由 CI（`.github/workflows/build.yml`，跑在 self-hosted runner 上）构建推送到 `ghcr.io/yiranxiaohui/claude-register`，**部署机器只 `pull`，不在本地跑 `docker build`**。
 
-### 嵌入式 Xray/V2Ray 兼容 SOCKS 出站
-
-Xray 与面板一起运行在 Claude Register 容器中，由 Supervisor 单独管理。设置页的「Xray 出站」可查看状态、配置 SOCKS5 上游、启动/停止/重启并测试出口；凭据保存在 `data/xray/config.json`（容器内权限 `0600`），不会回显到页面。配置 Xray 上游后，注册代理会自动切换到 `socks5h://127.0.0.1:10808`。
-
-Xray 暴露于容器 loopback，不发布宿主机端口。Xray 不会自动把 VLESS/VMess/Trojan 分享链接转换成配置；这些节点需通过 Xray 原生配置单独支持。
-
 面板里改的设置会写回 `config.yaml`，接口和日志里 AnyMail Key 等敏感字段做了脱敏。
+
+镜像已不再内置 Xray。从旧版升级时，如果注册代理仍是 `socks5h://127.0.0.1:10808`，启动时会按 `data/xray/config.json` 自动改回原 SOCKS5 上游；上游不是 SOCKS5 或文件缺失时保持原值并在日志提示，需在设置页重新填写。迁移后可手动删除 `data/xray/`。
 
 ### 账号管理（增删改查）
 
