@@ -28,7 +28,7 @@ class _ImpersonatingClient:
 
     为什么带凭据的 SOCKS5 要绕中继：实测 curl 直连这类机场上游，SOCKS 握手
     成功但 TLS ClientHello 一发出去就被掐断；经 SocksRelay 转发则正常。中继还
-    自带上游并发闸与握手重试（上游有 ~4 条并发上限），跟注册时浏览器走的是
+    自带并发控制与有总时限的握手重试，跟注册时浏览器走的是
     同一条路，检测结果也就跟真实使用一致。
 
     SOCKS 一律用 socks5h（域名交给上游解析）：本地 DNS 可能是 Clash fake-ip

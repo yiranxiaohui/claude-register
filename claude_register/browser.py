@@ -219,8 +219,7 @@ def lookup_timezone(proxy_url: str | None, *, timeout: float = 6.0) -> str | Non
 
 # 中继当场回绝、不占上游槽位的目标（后缀匹配）。实测 Chromium 即便带着
 # --disable-background-networking，打开登录页时仍会连这些后台服务；连同页面上的
-# 统计追踪，峰值能开到近 30 条隧道，而机场上游只给 3~4 条并发——Camoufox 自带
-# uBlock Origin 时不会有这些连接。
+# 统计追踪，会额外占用中继槽位；实际可用并发需按上游节点验证。
 CHROMIUM_BACKGROUND_HOSTS = (
     "clients1.google.com",
     "clients2.google.com",
@@ -260,8 +259,8 @@ def build_proxy_options(
     经代理查出口时区。返回 (proxy, relay, timezone)；relay 需由调用方在会话
     结束时 stop()，timezone 为 None 表示沿用系统时区。
 
-    max_upstream 透传给中继的上游并发闸门：注册流程不传（用默认 3，匹配
-    机场硬限额）；接管是交互式浏览，长命连接会钉死小闸门，调用方应放宽。
+    max_upstream 透传给中继的上游并发闸门：注册流程使用默认值/环境变量，
+    接管独立配置。长命连接会占满过小的上限，需要按实际节点容量设置。
     deny_hosts 是中继当场回绝的目标（见 REGISTRATION_DENY_HOSTS）。
     """
     proxy_cfg = parse_proxy(proxy)

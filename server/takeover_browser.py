@@ -33,8 +33,8 @@ from claude_register.flow import _split_login_timeout
 from claude_register.mailbox import utc_now_iso
 
 
-# 接管中继的上游并发上限。注册流程用默认 3（匹配机场硬限额、连接短命周转快），
-# 但接管是交互式浏览：claude.ai 的 HTTP/2 复用连接、SSE 事件流是几分钟不关的
+# 接管中继的并发上限可独立配置；实际容量需按上游节点验证。
+# 交互式浏览中，claude.ai 的 HTTP/2 复用连接、SSE 事件流是几分钟不关的
 # 长命连接，槽位按隧道生命周期持有，3 个槽会被前三条长命连接钉死，其余请求
 # 全在本地排队 30s 然后超时（表现为满屏「等待上游并发槽位超时」）。
 DEFAULT_TAKEOVER_MAX_UPSTREAM = 16

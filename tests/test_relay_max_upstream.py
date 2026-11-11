@@ -1,7 +1,7 @@
 """接管路径放宽中继上游并发：max_upstream 从 build_proxy_options 一路透传。
 
 背景：中继槽位是整条隧道生命周期持有，注册流程短连接够用；接管是交互式
-浏览，claude.ai 的 HTTP/2 复用 + SSE 长连接会把默认 3 个槽位钉死，其余
+浏览，claude.ai 的 HTTP/2 复用 + SSE 长连接会把过小的 3 个槽位钉死，其余
 请求全部排队 30s 超时。接管路径需要更宽的并发闸门。
 """
 from __future__ import annotations

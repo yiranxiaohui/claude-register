@@ -15,7 +15,9 @@ playwright driver 的 `normalizeProxySettings` 里就一句
 
 from __future__ import annotations
 
+import errno
 import os
+import select
 import socket
 import socketserver
 import struct
@@ -39,10 +41,8 @@ REP_HOST_UNREACHABLE = 0x04
 REP_CMD_NOT_SUPPORTED = 0x07
 REP_ATYP_NOT_SUPPORTED = 0x08
 
-# 上游握手（连接 + 认证 + CONNECT）的超时。握手阶段被挂住多半是撞了上游的
-# 并发限额（实测超限连接是「挂住不回复」而非快速 EOF，见 DEFAULT_MAX_UPSTREAM
-# 的说明），槽位周转很快，换条新连接重试大概率能过。取值让「挂满一次 +
-# backoff + 完整再试一次」能装进 RETRY_DEADLINE：5 + 0.4 + 5 ≈ 10.4s < 12s。
+# 单次尝试的总预算，覆盖解析上游地址、TCP、认证和 CONNECT。
+# 每次读写都使用同一截止时间，分段返回的数据不能不断延长预算。
 HANDSHAKE_TIMEOUT = 5.0
 PIPE_BUFFER = 65536
 
@@ -52,16 +52,8 @@ PIPE_BUFFER = 65536
 EXIT_IP_HOSTS = ("api.ipify.org", "checkip.amazonaws.com", "icanhazip.com")
 EXIT_IP_TIMEOUT = 12.0
 
-# 机场类代理常有并发连接上限（实测这个上游约 4 条），超限的连接会在握手阶段
-# 被拒（EOF）或被挂住不回复（撞 HANDSHAKE_TIMEOUT）。但槽位随着旧连接关闭很快
-# 释放，短暂重试就能过——一次失败就放弃会在注册流程中途白掉请求。只对「握手
-# 阶段被拒/挂住」重试，CONNECT 已经被上游明确拒绝（rep != 0）说明是目标本身
-# 的问题，重试没有意义。
-#
-# 重试总耗时必须远小于 page.goto 的 60s 导航超时：否则上游 hang 住时浏览器先超时，
-# 用户看到的仍是没信息量的导航超时，而真正有用的报错还没来得及冒出来。
-# RETRY_DEADLINE 是墙钟硬上限：挂住型失败一次就吃掉一个 HANDSHAKE_TIMEOUT，
-# 预算内装得下两次完整尝试；真的连不上就该早点认输。
+# 对暂时的握手失败做有限重试。透明网关接收 TCP 后仍可能连不上真实上游，
+# 因此 EOF/握手超时本身不能证明上游有并发限额。全部尝试与退避共用总预算。
 CONNECT_RETRIES = 4
 RETRY_BACKOFF = 0.4
 RETRY_DEADLINE = 12.0
@@ -69,23 +61,16 @@ RETRY_DEADLINE = 12.0
 # SOCKS5 认证子协商里用户名/密码都是单字节长度前缀，最长 255。
 MAX_CREDENTIAL_LEN = 255
 
-# 上游并发上限。机场类上游有硬并发连接数上限（实测这个上游约 4 条），超限的
-# 连接会被挂住（不回复），中继若无限并发转发就会超订上游：claude.ai 登录页
-# 十几条并发会把关键连接（hcaptcha、验证码提交）挤掉，表现为满屏「上游握手
-# 超时」且注册偶发失败。用信号量把中继对上游的并发闸到这个值，超出的连接在
-# 本地排队等槽位而不是冲上游被挂死。可用环境变量 RELAY_MAX_UPSTREAM 覆盖。
-# 默认取 3 而非实测的 ~4：留一格余量，免得上游偶尔只放 3 条（关连接的 TIME_WAIT
-# 残留、服务端抖动）时又擦边超订、重新触发 hang。确知上游能吃满 4 条时可上调。
-DEFAULT_MAX_UPSTREAM = 3
+# 给浏览器多个来源的长连接留出空间，可通过 RELAY_MAX_UPSTREAM 调整。
+# 接管浏览器单独配置并发；实际容量需要按节点验证，不能从超时报错推断。
+DEFAULT_MAX_UPSTREAM = 16
 
-# 空闲隧道回收：有连接在排队等槽位时，把空闲（双向都没有字节）超过这么久的
-# 隧道掐掉，把槽位让给排队者。浏览器（尤其 Chromium）会把用过的 keep-alive
-# 连接留着复用好几分钟，槽位按隧道生命周期持有，几条闲置连接就能把 3 个槽位
-# 钉死，新请求全在本地排队到超时。被掐的是闲置的复用连接，浏览器下次需要时
-# 自己重连（复用连接上的请求失败也会自动重发），代价只是多一次握手。
-IDLE_EVICT_AFTER = 5.0
-# 排队期间检查一次可回收隧道的间隔。
-EVICT_POLL = 0.25
+# SOCKS 隧道无法区分闲置连接与正在等待响应的 TLS/SSE 请求，不能按静默时间
+# 掐断连接来腾出槽位。排队、连接、握手和退避期间定期检查取消状态。
+CANCEL_POLL = 0.1
+# getaddrinfo 没有可移植的取消 API。解析放到有界 daemon worker 中；请求超时或
+# 取消时立即退出等待，晚到的解析结果不会再触发连接，也不会无限堆积解析线程。
+_DNS_SLOTS = threading.BoundedSemaphore(8)
 
 # 等本地槽位的上限。排队是常态，给足耐心；但不能无限等——真出现死锁式占满
 # 时，超过这个时间就回一个明确的失败码，好过让浏览器一路挂到导航超时。
@@ -109,7 +94,51 @@ def _looks_like_ipv4(text: str) -> bool:
     return text.count(".") == 3
 
 
-def _recv_exactly(sock: socket.socket, n: int) -> bytes:
+class _Cancelled(Exception):
+    """中继已停止或本地客户端已放弃请求，不再重试、也不报网络故障。"""
+
+
+def _noop(*args) -> None:
+    pass
+
+
+def _remaining(deadline: float, check_cancelled=_noop) -> float:
+    check_cancelled()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("已达到连接截止时间")
+    return remaining
+
+
+def _wait_socket(sock: socket.socket, deadline: float, check_cancelled, *, write=False):
+    while True:
+        timeout = min(CANCEL_POLL, _remaining(deadline, check_cancelled))
+        try:
+            readable, writable, errors = select.select(
+                [] if write else [sock], [sock] if write else [], [sock], timeout,
+            )
+        except (OSError, ValueError):
+            check_cancelled()
+            raise
+        _remaining(deadline, check_cancelled)
+        if readable or writable or errors:
+            return
+
+
+def _sendall(sock: socket.socket, data: bytes, deadline: float, check_cancelled):
+    pending = memoryview(data)
+    while pending:
+        _wait_socket(sock, deadline, check_cancelled, write=True)
+        try:
+            sent = sock.send(pending)
+        except BlockingIOError:
+            continue
+        if not sent:
+            raise ConnectionError("上游提前关闭")
+        pending = pending[sent:]
+
+
+def _recv_exactly(sock: socket.socket, n: int, *, deadline=None, check_cancelled=_noop) -> bytes:
     """收满 n 字节。收不满说明对端提前关了，抛 ConnectionError。
 
     SOCKS 是长度前缀协议，短读会让后续解析全部错位——必须收满。
@@ -117,12 +146,48 @@ def _recv_exactly(sock: socket.socket, n: int) -> bytes:
     chunks: list[bytes] = []
     remaining = n
     while remaining > 0:
-        chunk = sock.recv(remaining)
+        if deadline is not None:
+            _wait_socket(sock, deadline, check_cancelled)
+        try:
+            chunk = sock.recv(remaining)
+        except BlockingIOError:
+            if deadline is None:
+                raise
+            continue
         if not chunk:
             raise ConnectionError(f"对端提前关闭，还差 {remaining} 字节")
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _resolve_upstream(cfg: dict, deadline: float, check_cancelled):
+    while not _DNS_SLOTS.acquire(timeout=min(CANCEL_POLL, _remaining(deadline, check_cancelled))):
+        pass
+    done = threading.Event()
+    result = []
+
+    def resolve():
+        try:
+            result.append(socket.getaddrinfo(cfg["host"], cfg["port"], type=socket.SOCK_STREAM))
+        except Exception as exc:
+            result.append(exc)
+        finally:
+            _DNS_SLOTS.release()
+            done.set()
+
+    try:
+        _remaining(deadline, check_cancelled)
+        threading.Thread(target=resolve, daemon=True).start()
+    except BaseException:
+        _DNS_SLOTS.release()
+        raise
+    while not done.wait(min(CANCEL_POLL, _remaining(deadline, check_cancelled))):
+        pass
+    _remaining(deadline, check_cancelled)
+    if isinstance(result[0], Exception):
+        raise result[0]
+    return result[0]
 
 
 class UpstreamError(Exception):
@@ -131,101 +196,125 @@ class UpstreamError(Exception):
     def __init__(self, message: str, rep: int = REP_GENERAL_FAILURE, *, retryable: bool = False):
         super().__init__(message)
         self.rep = rep
-        # 握手阶段被拒（EOF / 连不上）多半是撞上了并发限额，重试有意义；
-        # 上游明确回了 rep != 0 是目标本身的问题，重试只是浪费时间。
+        # 暂时的网络失败可以重试；明确的认证/CONNECT 拒绝直接返回。
         self.retryable = retryable
 
 
-def _connect_upstream_once(cfg: dict, host: str, port: int, timeout: float) -> socket.socket:
+def _connect_upstream_once(
+    cfg: dict, host: str, port: int, deadline: float, *,
+    check_cancelled=_noop, track=_noop, untrack=_noop,
+) -> socket.socket:
     """跟上游完成 SOCKS5 握手，返回已建好隧道的 socket。
 
     host 原样透传给上游解析（socks5h 语义）：本地 DNS 可能被污染，
     而且本地解析会泄露我们真实的地理位置。
     """
+    up = None
+    stage = "解析上游地址"
     try:
-        up = socket.create_connection((cfg["host"], cfg["port"]), timeout)
-    except TimeoutError as exc:
-        # TCP 都连不上说明上游主机/网络有问题（并发限额挂的是握手回复，
-        # 不影响 TCP accept）——重试只会把导航超时耗光。
-        raise UpstreamError(f"连上游代理超时：{exc}", REP_HOST_UNREACHABLE) from exc
-    except OSError as exc:
-        raise UpstreamError(
-            f"连不上上游代理：{exc}", REP_HOST_UNREACHABLE, retryable=True
-        ) from exc
+        addresses = _resolve_upstream(cfg, deadline, check_cancelled)
+        stage = "TCP 连接"
+        last_error = OSError("上游地址没有可用的 TCP 结果")
+        for family, kind, proto, _, address in addresses:
+            _remaining(deadline, check_cancelled)
+            up = socket.socket(family, kind, proto)
+            track(up)  # 从 TCP 连接前开始登记，停止中继能关掉握手中的 socket。
+            up.setblocking(False)
+            try:
+                err = up.connect_ex(address)
+                if err in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, errno.EINTR):
+                    _wait_socket(up, deadline, check_cancelled, write=True)
+                    err = up.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if err:
+                    raise OSError(err, os.strerror(err))
+                break
+            except OSError as exc:
+                check_cancelled()
+                untrack(up)
+                up.close()
+                up = None
+                last_error = exc
+        else:
+            raise last_error
 
-    up.settimeout(timeout)
-    try:
+        def send(data):
+            _sendall(up, data, deadline, check_cancelled)
+
+        def recv(n):
+            return _recv_exactly(up, n, deadline=deadline, check_cancelled=check_cancelled)
+
+        stage = "协商认证方式"
         want_auth = bool(cfg.get("username") or cfg.get("password"))
         methods = [AUTH_NONE, AUTH_USER_PASS] if want_auth else [AUTH_NONE]
-        up.sendall(bytes([SOCKS_VERSION, len(methods)]) + bytes(methods))
-        ver, method = _recv_exactly(up, 2)
+        send(bytes([SOCKS_VERSION, len(methods)]) + bytes(methods))
+        ver, method = recv(2)
         if ver != SOCKS_VERSION:
             raise UpstreamError(f"上游不是 SOCKS5（版本 {ver}）")
         if method == AUTH_UNACCEPTABLE:
             raise UpstreamError("上游拒绝了所有认证方式")
         if method == AUTH_USER_PASS:
+            stage = "用户名密码认证"
             user = cfg.get("username", "").encode()
             pwd = cfg.get("password", "").encode()
-            up.sendall(b"\x01" + bytes([len(user)]) + user + bytes([len(pwd)]) + pwd)
-            _, status = _recv_exactly(up, 2)
+            send(b"\x01" + bytes([len(user)]) + user + bytes([len(pwd)]) + pwd)
+            _, status = recv(2)
             if status != 0x00:
                 raise UpstreamError("上游认证失败：用户名或密码不对")
         elif method != AUTH_NONE:
             raise UpstreamError(f"上游要求不支持的认证方式 {method}")
 
+        stage = "CONNECT 目标"
         d = host.encode()
-        up.sendall(
+        send(
             bytes([SOCKS_VERSION, CMD_CONNECT, 0x00, ATYP_DOMAIN, len(d)])
             + d
             + struct.pack("!H", port)
         )
-        _, rep, _, atyp = _recv_exactly(up, 4)
+        _, rep, _, atyp = recv(4)
         if atyp == ATYP_IPV4:
-            _recv_exactly(up, 4)
+            recv(4)
         elif atyp == ATYP_DOMAIN:
-            _recv_exactly(up, _recv_exactly(up, 1)[0])
+            recv(recv(1)[0])
         elif atyp == ATYP_IPV6:
-            _recv_exactly(up, 16)
-        _recv_exactly(up, 2)  # 绑定端口
+            recv(16)
+        recv(2)  # 绑定端口
         if rep != REP_SUCCESS:
             raise UpstreamError(f"上游拒绝 CONNECT {host}:{port}（rep={rep}）", rep)
-    except UpstreamError:
-        up.close()
+        _remaining(deadline, check_cancelled)
+        up.settimeout(None)
+        return up
+    except BaseException as exc:
+        if up is not None:
+            untrack(up)
+            up.close()
+        check_cancelled()
+        if isinstance(exc, TimeoutError):
+            raise UpstreamError(
+                f"上游连接超时（{stage}）：{exc}",
+                REP_HOST_UNREACHABLE, retryable=stage != "TCP 连接",
+            ) from exc
+        if isinstance(exc, OSError):
+            raise UpstreamError(f"上游连接失败（{stage}）：{exc}", retryable=True) from exc
         raise
-    except TimeoutError as exc:
-        up.close()
-        # 握手途中被挂住不回复——实测正是撞并发限额的表现（上游把超限连接
-        # hang 住而非 EOF）。槽位周转快，换条新连接重试大概率能过；重试的
-        # 墙钟预算由 _connect_upstream 的 RETRY_DEADLINE 兜底，不会耗光
-        # 浏览器的导航超时。
-        raise UpstreamError(f"上游握手超时：{exc}", retryable=True) from exc
-    except (OSError, ConnectionError) as exc:
-        up.close()
-        # 握手途中被 EOF——典型的撞并发限额表现，值得重试。
-        raise UpstreamError(f"上游握手失败：{exc}", retryable=True) from exc
-
-    up.settimeout(None)
-    return up
 
 
-def _connect_upstream(cfg: dict, host: str, port: int) -> socket.socket:
-    """带重试的上游连接。只重试握手阶段的失败（多半是并发限额），
-    上游明确拒绝的目标不重试。
-
-    重试受 RETRY_DEADLINE 墙钟约束：EOF 型失败是毫秒级返回的，挂住型失败
-    一次就吃掉一个 HANDSHAKE_TIMEOUT——后续尝试的超时按剩余预算收紧，
-    保证总耗时不越过 deadline 太多，不把浏览器的导航超时耗光。
-    """
+def _connect_upstream(
+    cfg: dict, host: str, port: int, *, check_cancelled=_noop, track=_noop, untrack=_noop,
+) -> socket.socket:
+    """全部尝试、DNS、握手与退避共用 RETRY_DEADLINE，取消后不再发起连接。"""
     deadline = time.monotonic() + RETRY_DEADLINE
     last: UpstreamError | None = None
     for attempt in range(CONNECT_RETRIES):
-        # 首次给完整超时；重试按剩余预算收紧，免得多次挂住把墙钟撑爆。
+        check_cancelled()
         remaining = deadline - time.monotonic()
-        if attempt and remaining <= RETRY_BACKOFF:
+        if remaining <= 0:
             break
-        timeout = HANDSHAKE_TIMEOUT if attempt == 0 else min(HANDSHAKE_TIMEOUT, remaining)
+        attempt_deadline = min(deadline, time.monotonic() + HANDSHAKE_TIMEOUT)
         try:
-            return _connect_upstream_once(cfg, host, port, timeout)
+            return _connect_upstream_once(
+                cfg, host, port, attempt_deadline,
+                check_cancelled=check_cancelled, track=track, untrack=untrack,
+            )
         except UpstreamError as exc:
             last = exc
             if not exc.retryable:
@@ -235,7 +324,10 @@ def _connect_upstream(cfg: dict, host: str, port: int) -> socket.socket:
             backoff = RETRY_BACKOFF * (attempt + 1)
             if time.monotonic() + backoff >= deadline:
                 break
-            time.sleep(backoff)
+            wake_at = time.monotonic() + backoff
+            while time.monotonic() < wake_at:
+                check_cancelled()
+                time.sleep(min(CANCEL_POLL, max(0, wake_at - time.monotonic())))
     if last is None:  # pragma: no cover - 循环至少跑一轮，必有 last
         raise UpstreamError("上游连接失败")
     raise last
@@ -247,42 +339,14 @@ def _host_matches(host: str, patterns) -> bool:
     return any(host == p or host.endswith("." + p) for p in patterns)
 
 
-class _Tunnel:
-    """一条已建立的隧道：记最近活动时间，供空闲回收挑选。"""
-
-    __slots__ = ("client", "upstream", "last_active", "evicted")
-
-    def __init__(self, client: socket.socket, upstream: socket.socket):
-        self.client = client
-        self.upstream = upstream
-        self.last_active = time.monotonic()
-        self.evicted = False
-
-    def touch(self) -> None:
-        self.last_active = time.monotonic()
-
-    def evict(self) -> None:
-        """掐断隧道：shutdown 唤醒两个方向阻塞在 recv 上的 _pipe，handler 随之收尾、释放槽位。"""
-        self.evicted = True
-        for sock in (self.client, self.upstream):
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-
-
-def _pipe(src: socket.socket, dst: socket.socket, tunnel: _Tunnel | None = None) -> None:
+def _pipe(src: socket.socket, dst: socket.socket) -> None:
     """单向搬字节，直到一端关闭。"""
     try:
         while True:
             data = src.recv(PIPE_BUFFER)
             if not data:
                 break
-            if tunnel is not None:
-                tunnel.touch()
             dst.sendall(data)
-            if tunnel is not None:
-                tunnel.touch()
     except OSError:
         pass
     finally:
@@ -294,13 +358,25 @@ def _pipe(src: socket.socket, dst: socket.socket, tunnel: _Tunnel | None = None)
 
 
 class _Handler(socketserver.BaseRequestHandler):
+    def _check_cancelled(self) -> None:
+        if self.server.stopping.is_set():
+            raise _Cancelled()
+        # 排队与握手时没有其他线程读取客户端。只窥视、不消费可能提前发送的
+        # TLS 数据；EOF/reset 才代表客户端已放弃，不能继续占槽位重试。
+        try:
+            readable, _, _ = select.select([self.request], [], [], 0)
+            if readable and not self.request.recv(1, socket.MSG_PEEK):
+                raise _Cancelled()
+        except (OSError, ValueError):
+            raise _Cancelled() from None
+
     def handle(self) -> None:
         client = self.request
         upstream: socket.socket | None = None
         replied = False  # CONNECT 回过之后就进数据流了，不能再往里塞协议字节
         slot_held = False  # 是否占着上游并发槽位，决定 finally 里要不要 release
-        self.server.track(client)
         try:
+            self.server.track(client)
             client.settimeout(HANDSHAKE_TIMEOUT)
             ver, nmethods = _recv_exactly(client, 2)
             if ver != SOCKS_VERSION:
@@ -344,18 +420,22 @@ class _Handler(socketserver.BaseRequestHandler):
             # 占一个上游并发槽位，全程持有到隧道结束——上游的限额是对「同时打开
             # 的连接数」而言，只在握手期占位挡不住后面并发的数据连接超订。拿不到
             # 槽位就在本地排队等，超过 SLOT_WAIT_TIMEOUT 才认输回失败码。
-            if not self.server.acquire_slot(SLOT_WAIT_TIMEOUT):
+            if not self.server.acquire_slot(SLOT_WAIT_TIMEOUT, self._check_cancelled):
                 if not self.server.quiet.is_set():
                     self.server.on_error(
                         f"{host}:{port} → 等待上游并发槽位超时（{SLOT_WAIT_TIMEOUT:.0f}s，"
-                        "上游并发已满）"
+                        "本地中继并发已满）"
                     )
                 self._reply(client, REP_HOST_UNREACHABLE)
                 return
             slot_held = True
 
             try:
-                upstream = _connect_upstream(self.server.upstream_cfg, host, port)
+                upstream = _connect_upstream(
+                    self.server.upstream_cfg, host, port,
+                    check_cancelled=self._check_cancelled,
+                    track=self.server.track, untrack=self.server.untrack,
+                )
             except UpstreamError as exc:
                 # 探测出口 IP 会挨个试几个站点，前面的失败属于正常降级，
                 # 报出来只会让用户以为代理坏了。
@@ -364,27 +444,17 @@ class _Handler(socketserver.BaseRequestHandler):
                 self._reply(client, exc.rep)
                 return
 
+            self._check_cancelled()
             self._reply(client, REP_SUCCESS)
             replied = True
             client.settimeout(None)
-            # 上游侧也要登记：反向 _pipe 阻塞在 upstream.recv 上，只掐客户端
-            # 那一头的话 back.join() 仍会卡住，整个 handler 还是活的。
-            self.server.track(upstream)
-            tunnel = _Tunnel(client, upstream)
-            self.server.add_tunnel(tunnel)
-
             # 双向转发。一个方向放到后台线程，另一个方向留在当前线程，
             # 这样 handle() 返回时隧道确实结束了（socketserver 会跟着关连接）。
-            try:
-                back = threading.Thread(
-                    target=_pipe, args=(upstream, client, tunnel), daemon=True,
-                )
-                back.start()
-                _pipe(client, upstream, tunnel)
-                back.join()
-            finally:
-                self.server.remove_tunnel(tunnel)
-        except (OSError, ConnectionError):
+            back = threading.Thread(target=_pipe, args=(upstream, client), daemon=True)
+            back.start()
+            _pipe(client, upstream)
+            back.join()
+        except (_Cancelled, OSError):
             pass
         except Exception as exc:
             # 兜底：任何没预料到的异常都要先回一个错误码再退场。静默断开会让
@@ -426,57 +496,39 @@ class _Server(socketserver.ThreadingTCPServer):
     # 新连接会被内核直接拒（或干脆丢弃等重传），表现就是页面偶发加载不全。
     request_queue_size = 128
 
-    def __init__(self, *args, max_upstream: int = DEFAULT_MAX_UPSTREAM,
-                 deny_hosts=(), idle_evict_after: float | None = IDLE_EVICT_AFTER,
-                 **kwargs):
+    def __init__(self, *args, max_upstream: int = DEFAULT_MAX_UPSTREAM, deny_hosts=(), **kwargs):
         self._live: set[socket.socket] = set()
         self._live_lock = threading.Lock()
-        # 限中继对上游的并发连接数，匹配上游的硬上限，避免超订。
+        self.stopping = threading.Event()
+        # 限制本中继同时打开的上游连接数；这不是对节点实际容量的探测。
         self.upstream_slots = threading.BoundedSemaphore(max_upstream)
         self.deny_hosts = tuple(h.lower().rstrip(".") for h in deny_hosts)
-        self.idle_evict_after = idle_evict_after
-        self._tunnels: set[_Tunnel] = set()
-        self._tunnels_lock = threading.Lock()
         super().__init__(*args, **kwargs)
 
-    def add_tunnel(self, tunnel: _Tunnel) -> None:
-        with self._tunnels_lock:
-            self._tunnels.add(tunnel)
-
-    def remove_tunnel(self, tunnel: _Tunnel) -> None:
-        with self._tunnels_lock:
-            self._tunnels.discard(tunnel)
-
-    def evict_idle(self) -> bool:
-        """掐掉空闲最久、且已空闲超过阈值的一条隧道；返回是否掐了。"""
-        if self.idle_evict_after is None:
-            return False
-        now = time.monotonic()
-        with self._tunnels_lock:
-            candidates = [
-                t for t in self._tunnels
-                if not t.evicted and now - t.last_active >= self.idle_evict_after
-            ]
-            if not candidates:
-                return False
-            victim = min(candidates, key=lambda t: t.last_active)
-            victim.evicted = True
-        victim.evict()
-        return True
-
-    def acquire_slot(self, timeout: float) -> bool:
-        """拿一个上游槽位；排队期间顺手回收空闲隧道，超时返回 False。"""
+    def acquire_slot(self, timeout: float, check_cancelled=_noop) -> bool:
+        """只等待已有隧道自然释放槽位，取消时退出，不中断其他请求。"""
         deadline = time.monotonic() + timeout
         while True:
+            check_cancelled()
+            if self.stopping.is_set():
+                raise _Cancelled()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
-            if self.upstream_slots.acquire(timeout=min(EVICT_POLL, remaining)):
+            if self.upstream_slots.acquire(timeout=min(CANCEL_POLL, remaining)):
+                try:
+                    check_cancelled()
+                    if self.stopping.is_set():
+                        raise _Cancelled()
+                except BaseException:
+                    self.upstream_slots.release()
+                    raise
                 return True
-            self.evict_idle()
 
     def track(self, sock: socket.socket) -> None:
         with self._live_lock:
+            if self.stopping.is_set():
+                raise _Cancelled()
             self._live.add(sock)
 
     def untrack(self, sock: socket.socket) -> None:
@@ -495,6 +547,7 @@ class _Server(socketserver.ThreadingTCPServer):
         对象，重复 close 是幂等的，handler 的 finally 再关一次没有副作用。
         """
         with self._live_lock:
+            self.stopping.set()
             live = list(self._live)
         for sock in live:
             try:
@@ -520,11 +573,10 @@ class SocksRelay:
     host = "127.0.0.1"
 
     def __init__(self, upstream_url: str, *, on_error=None, max_upstream: int | None = None,
-                 deny_hosts=(), idle_evict_after: float | None = IDLE_EVICT_AFTER):
+                 deny_hosts=()):
         self._cfg = self._parse_upstream(upstream_url)
         self._on_error = on_error or (lambda msg: None)
         self._deny_hosts = tuple(deny_hosts)
-        self._idle_evict_after = idle_evict_after
         self._max_upstream = (
             max_upstream if max_upstream and max_upstream > 0 else _default_max_upstream()
         )
@@ -565,7 +617,7 @@ class SocksRelay:
     def start(self) -> SocksRelay:
         server = _Server(
             (self.host, 0), _Handler, max_upstream=self._max_upstream,
-            deny_hosts=self._deny_hosts, idle_evict_after=self._idle_evict_after,
+            deny_hosts=self._deny_hosts,
         )
         server.upstream_cfg = self._cfg
         server.on_error = self._on_error
@@ -664,8 +716,8 @@ class SocksRelay:
 
     def stop(self) -> None:
         if self._server is not None:
+            self._server.close_live()  # 先取消排队、连接和握手，禁止新 socket 登记。
             self._server.shutdown()  # 停 accept 循环
-            self._server.close_live()  # 掐断已建立的隧道，否则它们会活过 stop()
             self._server.server_close()
             self._server = None
         if self._thread is not None:
