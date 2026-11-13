@@ -199,3 +199,94 @@ def test_launch_chromium_stops_playwright_on_failure(monkeypatch):
     with pytest.raises(OSError):
         browser.launch_chromium(headless=True)
     assert stopped == [True], "启动失败也要停掉 Playwright driver 进程"
+
+
+def test_browser_proxy_pool_limits_stay_below_relay_slots():
+    """浏览器自己的代理连接池要比中继槽位小，留出余量；Chromium 下限为 6。"""
+    assert browser.browser_proxy_pool_limits(16) == (12, 6)
+    assert browser.browser_proxy_pool_limits(32) == (24, 8)
+    assert browser.browser_proxy_pool_limits(4) == (6, 6)
+
+
+def test_launch_chromium_with_pool_limits_uses_temp_profile(monkeypatch):
+    """连接池上限只能写进 profile 的 Local State，所以改用临时 profile 的持久化上下文。"""
+    import json
+    import os
+
+    seen = {}
+
+    class FakeContext:
+        browser = "BROWSER"
+
+        def close(self):
+            seen["context_closed"] = True
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            raise AssertionError("设了连接池上限就不能走普通 launch")
+
+        def launch_persistent_context(self, user_data_dir, **kwargs):
+            seen["profile"] = user_data_dir
+            seen["kwargs"] = kwargs
+            with open(os.path.join(user_data_dir, "Local State"), encoding="utf-8") as f:
+                seen["state"] = json.load(f)
+            return FakeContext()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def stop(self):
+            seen["stopped"] = True
+
+    class FakeManager:
+        def start(self):
+            return FakePlaywright()
+
+    monkeypatch.setattr(browser, "sync_playwright", lambda: FakeManager())
+
+    session = browser.launch_chromium(
+        headless=False, proxy={"server": "socks5://127.0.0.1:1"}, proxy_pool_limits=(12, 6),
+    )
+
+    assert seen["state"] == {"net": {
+        "max_connections_per_proxy": 12,
+        "max_connections_per_proxy_for_websocket": 6,
+        "allow_socket_pool_size_randomization_for_proxies": False,
+    }}
+    assert seen["kwargs"]["no_viewport"] is True
+    assert seen["kwargs"]["proxy"] == {"server": "socks5://127.0.0.1:1"}
+    assert seen["kwargs"]["channel"] == "chromium"
+    assert session.browser == "BROWSER"
+    assert isinstance(session.context, FakeContext)
+    assert os.path.isdir(seen["profile"])
+
+    session.close()
+    assert seen["context_closed"] and seen["stopped"]
+    assert not os.path.exists(seen["profile"]), "关闭后要删除临时 profile"
+
+
+def test_launch_chromium_with_pool_limits_cleans_profile_on_failure(monkeypatch):
+    import os
+
+    seen = {}
+
+    class FakeChromium:
+        def launch_persistent_context(self, user_data_dir, **kwargs):
+            seen["profile"] = user_data_dir
+            raise OSError("no browser")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def stop(self):
+            seen["stopped"] = True
+
+    class FakeManager:
+        def start(self):
+            return FakePlaywright()
+
+    monkeypatch.setattr(browser, "sync_playwright", lambda: FakeManager())
+    with pytest.raises(OSError):
+        browser.launch_chromium(headless=True, proxy_pool_limits=(6, 6))
+    assert seen["stopped"]
+    assert not os.path.exists(seen["profile"])

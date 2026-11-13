@@ -60,17 +60,15 @@ def test_takeover_browser_uses_wide_relay_and_display(monkeypatch):
     class Session:
         def __init__(self):
             self.browser = self
+            self.context = self
+            self.pages = [self]
             self.closed = False
-
-        def new_context(self, **kwargs):
-            seen["context"] = kwargs
-            return self
 
         def add_cookies(self, cookies):
             seen["cookies"] = cookies
 
         def new_page(self):
-            return self
+            raise AssertionError("应复用持久化上下文自带的标签页")
 
         def goto(self, url, **kwargs):
             seen["url"] = url
@@ -96,7 +94,8 @@ def test_takeover_browser_uses_wide_relay_and_display(monkeypatch):
     assert seen["launch"]["headless"] is False
     assert seen["launch"]["display"] == ":100"
     assert seen["launch"]["proxy"] == {"server": "socks5://127.0.0.1:1"}
-    assert seen["context"] == {"no_viewport": True}
+    # 浏览器自己的代理连接池压在中继槽位以下，空闲长连接由浏览器关闭腾槽位。
+    assert seen["launch"]["proxy_pool_limits"] == (12, 6)
     assert seen["cookies"][0]["name"] == "sessionKey"
     assert seen["url"] == "https://claude.ai"
     # 只等首个响应，不等 DOMContentLoaded：assets 经代理卡住时接管也不能失败。
@@ -111,9 +110,8 @@ def test_manual_takeover_does_not_wait_for_domcontentloaded(monkeypatch):
     class Session:
         def __init__(self):
             self.browser = self
-
-        def new_context(self, **kwargs):
-            return self
+            self.context = self
+            self.pages = []
 
         def add_cookies(self, cookies):
             raise AssertionError("手动登录模式不注入 Cookie")

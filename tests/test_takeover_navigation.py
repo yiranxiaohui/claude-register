@@ -13,7 +13,8 @@ from server.takeover import TakeoverError, TakeoverManager
 @pytest.fixture
 def takeover(monkeypatch):
     session = Mock()
-    context = session.browser.new_context.return_value
+    context = session.context
+    context.pages = []
     page = context.new_page.return_value
     page.context = context
     context.browser = session.browser

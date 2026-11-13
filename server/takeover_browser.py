@@ -15,13 +15,13 @@ from claude_register.browser import (
     BROWSER_INSTALL_HINT,
     TAKEOVER_DENY_HOSTS,
     URL as LOGIN_URL,
+    browser_proxy_pool_limits,
     build_proxy_options,
     extract_session_key,
     fill_code,
     fill_email,
     hcaptcha_visible,
     launch_chromium,
-    new_context,
     open_login,
     open_magic_link,
     wait_code_screen,
@@ -37,7 +37,10 @@ from claude_register.mailbox import utc_now_iso
 # 交互式浏览中，claude.ai 的 HTTP/2 复用连接、SSE 事件流是几分钟不关的
 # 长命连接，槽位按隧道生命周期持有，3 个槽会被前三条长命连接钉死，其余请求
 # 全在本地排队 30s 然后超时（表现为满屏「等待上游并发槽位超时」）。
+# 浏览器自己的每代理连接池上限会压到这个值以下（见 browser_proxy_pool_limits）。
 DEFAULT_TAKEOVER_MAX_UPSTREAM = 16
+# 浏览器连接池最少 6 条，槽位再少就留不出余量。
+MIN_SAFE_TAKEOVER_MAX_UPSTREAM = 8
 
 
 # 接管页导航只等到 commit（收到首个响应），不等 DOMContentLoaded。
@@ -200,17 +203,28 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
 
     有 session_key 时注入 Cookie 打开已登录首页；为空时是「手动登录」模式：
     直接打开登录页（可选预填邮箱），由用户在接管画面里完成登录。
+
+    浏览器对代理的连接池上限低于中继槽位：用户逐个打开新站点时，由浏览器关掉
+    已访问站点的空闲长连接，而不是让新连接在中继里排队到超时。
     """
+    max_upstream = takeover_max_upstream()
     proxy_options, relay, timezone = build_proxy_options(
-        proxy or None, max_upstream=takeover_max_upstream(),
+        proxy or None, max_upstream=max_upstream,
         deny_hosts=TAKEOVER_DENY_HOSTS,
     )
+    pool_limits = browser_proxy_pool_limits(max_upstream)
+    if relay is not None and max_upstream < MIN_SAFE_TAKEOVER_MAX_UPSTREAM:
+        log(
+            f"TAKEOVER_MAX_UPSTREAM={max_upstream} 低于 {MIN_SAFE_TAKEOVER_MAX_UPSTREAM}："
+            f"浏览器连接池至少 {pool_limits[0]} 条，空闲长连接仍可能占满中继槽位。"
+        )
     try:
         session = launch_chromium(
             headless=False,
             proxy=proxy_options,
             display=display,  # 挂到 Xpra 管理的 :100 虚拟桌面
             timezone=timezone,
+            proxy_pool_limits=pool_limits,
         )
     except Exception as exc:
         if relay is not None:
@@ -218,11 +232,11 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
         raise RuntimeError(
             f"启动接管浏览器失败（{exc}）。{BROWSER_INSTALL_HINT}，并确认 Xvfb 可用。"
         ) from exc
-    browser = session.browser
     try:
-        context = new_context(browser)
+        # 持久化上下文启动时自带一个空白标签页，直接复用，接管画面里不留多余空页。
+        context = session.context
+        page = context.pages[0] if context.pages else context.new_page()
         if not session_key:
-            page = context.new_page()
             if _open_takeover_page(page, LOGIN_URL):
                 log("手动登录浏览器已打开 claude.ai 登录页（页面在接管画面中继续加载）。")
                 if login_email:
@@ -236,7 +250,6 @@ def open_takeover_browser(*, session_key: str, proxy: str = "", display: str = "
             "secure": True,
             "httpOnly": True,
         }])
-        page = context.new_page()
         if _open_takeover_page(page, "https://claude.ai"):
             log("接管浏览器已注入 sessionKey 并打开 claude.ai（页面在接管画面中继续加载）。")
     except Exception as exc:

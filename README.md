@@ -42,6 +42,8 @@ docker compose up -d
 
 每个中继的并发由环境变量控制：注册/检测使用 `RELAY_MAX_UPSTREAM`，浏览器接管使用 `TAKEOVER_MAX_UPSTREAM`，默认均为 16。槽位占满时最多排队 30 秒，再返回明确错误。设置为 3 容易被长连接占满；应按节点实际容量调整，握手超时本身不能证明节点只有 3～4 条并发。
 
+中继无法区分空闲与活动隧道，而 Chromium 默认会把访问过的站点的空闲长连接留在连接池里，直到自己的每代理上限（远大于 16）满了才关。接管浏览器因此使用临时 profile，把 Chromium 的每代理连接上限设为 `TAKEOVER_MAX_UPSTREAM` 的 3/4（WebSocket 为 1/4，均最少 6），由浏览器关闭最久未用的空闲连接腾出槽位；否则连续打开几个站点后，新站点（例如 SSO 跳转的 `api.workos.com`）会排队 30 秒后报 `ERR_SOCKS_CONNECTION_FAILED`。`TAKEOVER_MAX_UPSTREAM` 不宜低于 8。
+
 ### 账号管理（增删改查）
 
 「账号管理」页支持完整的增删改查：

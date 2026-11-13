@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import os
 import random
 import re
 import shutil
 import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -341,28 +343,79 @@ def chromium_args(*, display: str | None, proxied: bool) -> list[str]:
     return args
 
 
+# 统一的浏览器上下文参数：窗口尺寸即视口；语言在启动层定好了。
+CONTEXT_OPTIONS = {"no_viewport": True}
+
+# Chromium 对每个代理各有一套普通/WebSocket 连接池，只在池满时才关闭最久未用的
+# 空闲 socket 或没有活动流的 HTTP/2 会话。默认上限远大于中继槽位：池没满时，
+# 访问过的站点的空闲长连接会一直留着，而中继按隧道生命周期占槽且分不清空闲与
+# 活动连接，新目标只能排队到超时，浏览器报 ERR_SOCKS_CONNECTION_FAILED。
+# 把浏览器自己的上限压到中继槽位以下，由知道连接是否空闲的浏览器来腾槽位。
+# Chromium 把这两个 Local State 偏好钳在 6～256。
+BROWSER_PROXY_POOL_MIN = 6
+
+
+def browser_proxy_pool_limits(relay_slots: int) -> tuple[int, int]:
+    """按中继槽位算出浏览器每代理连接池上限 (普通, WebSocket)。
+
+    普通池取槽位的 3/4，余量留给 WebSocket、浏览器级后台请求和浏览器已关闭
+    但中继仍在收尾的隧道。槽位小于 8 时浏览器下限 6 已放不下余量。
+    """
+    normal = max(BROWSER_PROXY_POOL_MIN, relay_slots * 3 // 4)
+    websocket = max(BROWSER_PROXY_POOL_MIN, relay_slots // 4)
+    return normal, websocket
+
+
+def _write_proxy_pool_prefs(profile_dir: str, limits: tuple[int, int]) -> None:
+    normal, websocket = limits
+    state = {"net": {
+        "max_connections_per_proxy": normal,
+        "max_connections_per_proxy_for_websocket": websocket,
+        # 新版 Chromium 会给代理连接池随机追加容量，关掉以免越过中继槽位。
+        "allow_socket_pool_size_randomization_for_proxies": False,
+    }}
+    with open(os.path.join(profile_dir, "Local State"), "w", encoding="utf-8") as f:
+        json.dump(state, f)
+
+
 class ChromiumSession:
     """一个 Playwright + Chromium 实例；close() 负责全部收尾。
 
     Playwright Sync API 绑定创建它的线程，close() 必须在同一线程调用。
+    带 context 时是临时 profile 上的持久化上下文，关闭后删除 profile 目录。
     """
 
-    def __init__(self, playwright, browser):
+    def __init__(self, playwright, browser, *, context=None, profile_dir: str | None = None):
         self._playwright = playwright
         self.browser = browser
+        self.context = context
+        self._profile_dir = profile_dir
 
     def close(self) -> None:
         try:
-            self.browser.close()
+            if self.context is not None:
+                self.context.close()
+            else:
+                self.browser.close()
         except Exception:  # noqa: BLE001
             pass
         finally:
-            self._playwright.stop()
+            try:
+                self._playwright.stop()
+            finally:
+                if self._profile_dir:
+                    shutil.rmtree(self._profile_dir, ignore_errors=True)
 
 
 def launch_chromium(*, headless: bool, proxy: dict | None = None,
-                    display: str | None = None, timezone: str | None = None) -> ChromiumSession:
-    """启动 Playwright 自带的 Chromium（channel=chromium：完整版，而非 headless shell）。"""
+                    display: str | None = None, timezone: str | None = None,
+                    proxy_pool_limits: tuple[int, int] | None = None) -> ChromiumSession:
+    """启动 Playwright 自带的 Chromium（channel=chromium：完整版，而非 headless shell）。
+
+    proxy_pool_limits 为 (普通, WebSocket) 每代理连接上限：Chromium 只从 profile 的
+    Local State 读取它，所以此时改用临时 profile 上的持久化上下文，会话的
+    context 属性就是这个唯一上下文。
+    """
     env = dict(os.environ)
     # Linux 上 Chromium 的界面/Intl 语言取自环境变量，--lang 管不到。
     env.update(LANG="en_US.UTF-8", LANGUAGE="en_US:en")
@@ -373,6 +426,7 @@ def launch_chromium(*, headless: bool, proxy: dict | None = None,
         # 用进程级 TZ 而不是 CDP 时区模拟：与系统时区行为完全一致，不留模拟痕迹。
         env["TZ"] = timezone
     playwright = sync_playwright().start()
+    profile_dir = None
     try:
         options: dict = {
             "channel": "chromium",
@@ -383,11 +437,23 @@ def launch_chromium(*, headless: bool, proxy: dict | None = None,
         }
         if proxy is not None:
             options["proxy"] = proxy
-        browser = playwright.chromium.launch(**options)
+        if proxy_pool_limits is None:
+            return ChromiumSession(playwright, playwright.chromium.launch(**options))
+        profile_dir = tempfile.mkdtemp(prefix="claude-register-chromium-")
+        _write_proxy_pool_prefs(profile_dir, proxy_pool_limits)
+        context = playwright.chromium.launch_persistent_context(
+            profile_dir, **options, **CONTEXT_OPTIONS,
+        )
     except Exception:
-        playwright.stop()
+        try:
+            playwright.stop()
+        finally:
+            if profile_dir:
+                shutil.rmtree(profile_dir, ignore_errors=True)
         raise
-    return ChromiumSession(playwright, browser)
+    return ChromiumSession(
+        playwright, context.browser, context=context, profile_dir=profile_dir,
+    )
 
 
 BROWSER_INSTALL_HINT = "请先运行 `uv run playwright install chromium` 下载浏览器"
@@ -442,7 +508,7 @@ def browser_session(proxy: str | None = None):
 
 def new_context(browser):
     """统一的浏览器上下文：窗口尺寸即视口（no_viewport）；语言在启动层定好了。"""
-    return browser.new_context(no_viewport=True)
+    return browser.new_context(**CONTEXT_OPTIONS)
 
 
 def new_page(browser):
